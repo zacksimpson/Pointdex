@@ -720,7 +720,7 @@ void PokemonActivity::buildList(UiApp::ScreenType& screen) {
   if (screen_ == Screen::Event)
     top = renderer.getScreenHeight() - metrics.buttonHintsHeight - rowCount_ * rowHeight_ - 8;
   listBounds_ = Rect{8, top, renderer.getScreenWidth() - 16, rowCount_ * rowHeight_};
-  screen.setContentMargin(
+  screen.setContentMarginFromScreen(
       fui::Insets{static_cast<int16_t>(listBounds_.y), 8,
                   static_cast<int16_t>(renderer.getScreenHeight() - listBounds_.y - listBounds_.height), 8});
   fui::ListProps props;
