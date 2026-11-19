@@ -5,12 +5,16 @@
 #include <FreeInkApp.h>
 #include <FreeInkUIGfxRenderer.h>
 #include <PokemonPromptContext.h>
+#include <PokemonTrainers.h>
+#include <PokemonUiLayout.h>
 
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <span>
 
 #include "activities/Activity.h"
+#include "components/pokemon/PokemonMoveEffect.h"
 #include "components/themes/BaseTheme.h"
 #include "pokemon/PokemonService.h"
 #include "util/ButtonNavigator.h"
@@ -33,16 +37,65 @@ class PokemonActivity final : public Activity {
     Summary,
     Actions,
     Move,
+    Moveset,
+    MovesetPick,
+    TmReplaceSlot,
     Pc,
     PcOrder,
+    PcReleaseConfirm,
+    EvolveConfirm,
     Bag,
+    BagEvolution,
+    BagMedicine,
+    BagBalls,
+    BagMachine,
     ItemTarget,
+    PpUpSlot,
+    // Ether/Max Ether: which move of the chosen Pokemon gets its PP back.
+    EtherSlot,
     Pokedex,
     PokedexDetail,
     Event,
+    Battle,
+    BattleMoves,
+    BattleBalls,
+    BattleBag,
+    BattleSwitch,
+    GymList,
+    Badges,
+    HallOfFame,
+    Settings,
     ResetFirst,
     ResetFinal,
     Message,
+  };
+
+  // Which Bag category ItemTarget was entered from - determines both what
+  // activate() does with the selection and which screen goBack() returns
+  // to (Bag itself is just the 3-way category picker, not a target list).
+  enum class BagCategory : uint8_t {
+    Evolution,
+    Medicine,
+    Machine,
+    // Entered from Screen::BattleBag (Stage 18) rather than the out-of-battle
+    // Screen::Bag - same item-then-target flow through Screen::ItemTarget,
+    // but the outcome returns to Screen::Battle (and syncs battlePlayer_ if
+    // the target was the active combatant) instead of Screen::Party.
+    BattleMedicine,
+    // PP Up - lives as a trailing synthetic row inside Screen::BagMedicine's
+    // list (its count lives in its own ppUpCount field, not bagCounts, so it
+    // can't join the generic per-category item walk). Unlike every other
+    // category there's only ever one PP Up "item" to pick from, so selecting
+    // it goes straight to Screen::ItemTarget, then straight to
+    // Screen::PpUpSlot (always - no MovesetFull-style retry branching, every
+    // occupied slot is valid).
+    PpUp,
+    // EV vitamins (HP Up/Protein/Iron/Calcium/Carbos) - trailing synthetic rows
+    // in Screen::BagMedicine like PpUp (counts live in vitaminCounts, not
+    // bagCounts). Picking one goes to Screen::ItemTarget, then applies straight
+    // to the chosen Pokemon via PokemonService::useVitamin() and confirms with a
+    // message (the change is otherwise invisible outside the Summary EV table).
+    Vitamin,
   };
 
   static constexpr uint8_t ROW_CAPACITY = 10;
@@ -53,7 +106,18 @@ class PokemonActivity final : public Activity {
   bool refreshSnapshot();
   void activate();
   void goBack();
-  void openNickname(uint32_t recordId, bool starter, Screen cancelScreen);
+  // `routeSuccessThroughPendingEvent`: true (the default) means a successful
+  // rename/starter-naming lands on Screen::Menu, or Screen::Event if a
+  // reading-time event happens to be queued right now - the behavior the
+  // post-catch/starter naming flow wants. false means it lands on
+  // `cancelScreen` instead, exactly like every sibling CollectionAction
+  // (Deposit/Withdraw/EvolutionPrompts) already returns the player to where
+  // they came from - what the Rename-an-already-owned-Pokemon flow
+  // (Screen::Actions) wants instead. Both the success AND the SD-write-
+  // failure branch use the same rule - see docs/development/pokemon-gen1-
+  // audit-round6.md item 2.6.
+  void openNickname(uint32_t recordId, bool starter, Screen cancelScreen,
+                    bool routeSuccessThroughPendingEvent = true);
   void finishStarter(const char* nickname);
   void showMessage(const char* message, Screen returnScreen);
   void buildUi(freeink::ui::FreeInkApp<24, 8>::ScreenType& screen);
@@ -62,12 +126,161 @@ class PokemonActivity final : public Activity {
   void renderFocused();
   void renderRowArt();
   void renderHeaderAndHints();
+  // `preserveSideEffects`: true when this (re)builds a BattleCombatant for a
+  // Pokemon continuing the SAME already-in-progress battle (a voluntary/
+  // forced mid-battle switch, or the opponent's team advancing to its next
+  // member) - Reflect/Light Screen/Mist protect the whole SIDE in real Gen 1
+  // and must survive that kind of switch. Left false (the default) at every
+  // fresh-battle-start call site (enterBattle()/enterGymBattle()), where
+  // whatever is sitting in battlePlayer_/battleOpponent_ is stale leftover
+  // state from a previous, already-concluded battle and must NOT carry
+  // forward - see round 6 audit item 2.5.
+  bool setupBattlePlayer(int slot, bool preserveSideEffects = false);
+  void setupBattleOpponent(uint16_t speciesId, uint8_t level, std::span<const uint8_t> fixedMoves = {},
+                           pokemon::Gender gender = pokemon::Gender::Unknown, bool isShiny = false,
+                           bool preserveSideEffects = false);
+  bool enterBattle(const pokemon::PendingEvent& pending);
+  bool enterGymBattle(uint8_t gymIndex);
+  // A trainer met while reading (PendingEventKind::Trainer): the same
+  // multi-Pokemon battle as a gym, with the team rebuilt from the event
+  // (buildTrainerTeam()) and gymChallengeIndex_ = ROAD_TRAINER_INDEX.
+  bool enterTrainerBattle(const pokemon::PendingEvent& pending);
+  // The team and name of the trainer being fought (gym or road trainer).
+  std::span<const pokemon::GymTeamMember> challengeTeam() const;
+  const char* challengeTrainerName() const;
+  // End of a road-trainer battle (won, lost or forfeited): resolves the
+  // pending event, reports any item left behind and returns to the queue.
+  void finishTrainerBattle(bool won, bool playerAlsoFainted);
+  // On opening the game: when items went into the bag since the last visit
+  // (PokemonState::receivedItems), lists them on Screen::Message (cleared from
+  // the save as it is shown), then goes on to the queue or the menu. False
+  // when there was nothing to show.
+  bool showReceivedItems();
+  void renderReceivedItems(int contentTop);
+  // Sends out gym team member `member` (real team index `teamIndex`): builds
+  // the combatant, sets the trainer AI's skill for this gym, and restores what
+  // it had left if the trainer withdrew it earlier (gymBench_). preserveSideEffects
+  // as for setupBattleOpponent(): true for any send-out after the first.
+  void setupGymOpponent(uint8_t teamIndex, const pokemon::GymTeamMember& member, bool preserveSideEffects);
+  void savePlayerBattleEntry();
+  void resolveBattleAsPass();
+  void finishItemUseMidBattle(const char* usedLine);
+  // A Medicine-category item just landed on `recordId` mid-battle: syncs the live
+  // combatant if it was the target, then spends the turn.
+  void finishBattleMedicine(uint32_t recordId);
+  // Applies selectedMedicineItemId_ to `recordId` from the Bag (in or out of
+  // battle); `moveSlot` is the Ether/Max Ether target, -1 otherwise.
+  void applyMedicine(uint32_t recordId, int moveSlot);
+  bool isActiveBattler(uint32_t recordId) const;
+  bool routeAfterOpponentOnlyTurn(const pokemon::BattleTurnResult& result);
+  bool syncBattlePlayerAfterXpAward();
+  void finishBattleAfterWildFainted();
+  void finishBattleAfterPlayerFainted();
+  // playerAlsoFainted: the exchange that produced this win also left the
+  // player's own active Pokemon at 0 HP (a mutual KO the player caused - see
+  // round 4 audit bug 2.9). Only ever true
+  // when called from finishBattleAfterWildFainted()'s gym path - the
+  // Whirlwind/Roar-forced-switch call site can't produce a fainted attacker.
+  void advanceGymOpponentOrFinish(bool playerAlsoFainted = false);
+  void finishGymChallenge(bool won, bool playerAlsoFainted = false);
+  void buildBattleLog(const pokemon::BattleTurnResult& result);
+  void renderBattleHud();
+  void renderBattleMenu();
+  void renderBattleMoveMenu();
+  int battleMenuTop() const;
+  Rect battleGridCellRect(int index) const;
+  void renderMenuGrid();
+  // Compact "how close to a guaranteed drop" readout, drawn below the Menu
+  // grid in whatever screen space it leaves unused. Purely a display of
+  // PokemonState fields the engine already persists (encounterMisses/
+  // ballMisses/medicineMisses/machineMisses/itemMisses) - no new save data.
+  void renderMenuPityBars();
+  void renderTrainerCard(int contentTop);
+  void renderHallOfFame(int contentTop);
+  // Shared by renderTrainerCard() (what gets drawn) and loop()'s touch
+  // hit-test for the Champion cell (what gets tapped) - the two grids differ
+  // only in tile count/columns/height cap, both driven by
+  // pokemonTrainerCardGrid(). `hallOfFame` picks which of the two.
+  int trainerCardCells(pokemon::PokemonUiRect* cells, int capacity, bool hallOfFame) const;
+  void renderBagGrid();
+  void renderPcOrderButtons();
+  // Bag item lists (Stones/Medicine/Balls/TM-HM, and Bag/Balls mid-battle)
+  // and the move-replacement list reserve a panel at the bottom: it describes
+  // the highlighted entry, and selecting one opens Use/Cancel (Learn/Forget
+  // for moves) buttons in it (see renderItemPanel()). Moveset shows the same
+  // panel without buttons.
+  bool showsItemPanel() const;
+  bool showsInfoPanel() const;
+  int infoPanelTextLines() const;
+  bool itemPanelCanUse() const;
+  int itemPanelButtonCount() const;
+  int itemPanelHeight() const;
+  Rect itemPanelRect() const;
+  Rect itemPanelButtonRect(int index) const;
+  void openItemPanel();
+  void closeItemPanel();
+  void renderItemPanel();
+  // Short-choice screens (prompts, confirmations, Event, Starter, Settings,
+  // Actions) render their options as buttons instead of a text list - see
+  // isChoiceButtonScreen().
+  bool isChoiceButtonScreen() const;
+  int choiceColumns() const;
+  Rect choiceCellRect(int index) const;
+  int choicePageSize() const;
+  int choicePageStart() const;
+  void movesetPickInfo(int index, const pokemon::BattleRecordEntry& entry, char* title, size_t titleSize, char* text,
+                       size_t textSize) const;
+  void renderChoiceButtons();
+  void moveChoiceSelection(MappedInputManager::Button direction);
+  int buttonGridTop() const;
+  Rect buttonGridCellRect(int index, int columns = 2) const;
+  void drawGridButton(const Rect& cell, bool selected, const char* label);
+  int battlePlayerMoveCount() const;
+  bool battlePlayerHasAnyUsablePp() const;
+  void resolveBattlePlayerMoveTurn(uint8_t moveSlot);
+  // What follows a resolved move turn (win, faint, forced switch, back to
+  // the menu) - run right away, or once the move animation has played.
+  void finishBattlePlayerMoveTurn(const pokemon::BattleTurnResult& result);
+  // Queues the turn's move-effect frames; false when nothing visible happened.
+  bool startMoveAnimation(const pokemon::BattleTurnResult& result);
+  // Frames step `step` of the move animation shows.
+  uint8_t moveAnimationStepFrames(uint8_t step) const;
+  void setMoveAnimationLog();
+  void advanceMoveAnimation();
+  // Snapshots both sides' HP/status before a turn is resolved, for the animation.
+  void rememberHpBeforeTurn();
+  // A side as its HP panel shows it: while a move animation plays, the HP of
+  // the last hit that has landed and the status from before the turn.
+  pokemon::BattleCombatant shownBattleCombatant(bool player) const;
+  // Trainer AI (gym/Elite Four only, not the Champion - see
+  // gymTeamOrder_'s doc comment - and never a wild encounter): decides
+  // whether the opponent should use a healing item or proactively switch
+  // instead of attacking this turn. If so, mutates battleOpponent_ (and
+  // gymTeamOrder_/opponentHealChargesRemaining_ as needed) and writes a
+  // "Trainer used ...!"-style line into `buffer`, returning true; otherwise
+  // leaves everything untouched and returns false.
+  bool trainerAiShouldActInsteadOfMoveThisTurn(char* buffer, size_t size);
+  // Stage 13: which party members can currently fight (BattleRecordEntry's
+  // currentHp > 0, via the read-only peekBattleMoves - no battle-store
+  // writes just from checking). firstUsablePartySlot() picks who starts a
+  // fresh battle; the usablePartySlot* pair excludes battlePartySlot_
+  // itself, for the mid-battle switch picker.
+  int firstUsablePartySlot() const;
+  size_t usablePartySlotCount() const;
+  int usablePartySlotAt(size_t index) const;
   int logicalCount() const;
   int listTop() const;
+  int rowHeightForScreen() const;
+  bool canEvolveFocused() const;
+  bool showsPartyHealthRows() const;
+  bool showsMachineCapabilityRows() const;
   int rowsPerPage() const;
   int pageStart() const;
+  void renderPartyRowHealth(int rowY, const pokemon::PokemonRecord& record);
+  void renderPartyRowMachineCapability(int rowY, const pokemon::PokemonRecord& record);
   bool isListScreen() const;
   uint32_t selectedRecordId() const;
+  pokemon::PokemonRecord selectedRecord() const;
   static void screenBuilder(UiApp::ScreenType& screen, void* user);
   static void onRow(const freeink::ui::ActionEvent& event, void* user);
 
@@ -85,12 +298,104 @@ class PokemonActivity final : public Activity {
   uint16_t pokedexSpecies_ = 1;
   pokemon::Gender starterGender_ = pokemon::Gender::Male;
   uint32_t focusedRecordId_ = 0;
+  // Cached alongside focusedRecordId_ at every one of its 3 assignment
+  // sites (all already have the full record in RAM already - from
+  // snapshot_.party or pcPage_, not a fresh read) so the Moveset/
+  // MovesetPick/TmReplaceSlot/PpUpSlot screens don't call readRecord() once
+  // per row/frame/keypress for data that never changes while focused on the
+  // same Pokemon.
+  pokemon::PokemonRecord focusedRecord_{};
   pokemon::PokemonPromptContext nicknamePrompt_{};
   pokemon::EvolutionItem selectedItem_ = pokemon::EvolutionItem::None;
-  char message_[96]{};
+  BagCategory bagCategory_ = BagCategory::Evolution;
+  uint8_t selectedMachineItemId_ = 0;
+  uint8_t selectedMachineMoveId_ = 0;
+  uint8_t selectedMedicineItemId_ = 0;
+  uint8_t movesetSlot_ = 0;
+  // The "items received" list drawn instead of message_ while showingReceived_.
+  std::array<uint8_t, pokemon::POKEMON_ITEM_ID_MAX> receivedSummary_{};
+  bool showingReceived_ = false;
+  char message_[192]{};  // long enough for a 32-byte nickname inside a translated (up to ~2 bytes per letter) sentence
+  pokemon::BattleCombatant battlePlayer_{};
+  pokemon::BattleCombatant battleOpponent_{};
+  char battleLog_[160]{};
+  // Move animation (see startMoveAnimation()): each step plays its effect's
+  // frames over the target, then - for a move that hit - the target blinks
+  // out and back, as in Red/Blue. The turn's full log and its outcome follow.
+  struct MoveAnimationStep {
+    pokemon::MoveEffectStep effect{};
+    bool byPlayer = false;
+  };
+  std::array<MoveAnimationStep, 2> animationSteps_{};
+  uint8_t animationStepCount_ = 0;
+  uint8_t animationStep_ = 0;
+  uint8_t animationFrame_ = 0;  // within the current step
+  bool animating_ = false;
+  unsigned long animationNextFrameMs_ = 0;
+  pokemon::BattleTurnResult animationResult_{};
+  char animationFinalLog_[160]{};
+  // Both sides' HP and status before the animated turn: the HP panels show
+  // these until each hit lands (see shownBattleCombatant()).
+  uint16_t animationPlayerHpBefore_ = 0;
+  uint16_t animationOpponentHpBefore_ = 0;
+  pokemon::Ailment animationPlayerStatusBefore_ = pokemon::Ailment::None;
+  pokemon::Ailment animationOpponentStatusBefore_ = pokemon::Ailment::None;
+  uint8_t gymChallengeIndex_ = 0;         // 0 = not fighting a gym/Elite Four right now
+  // gymChallengeIndex_ while fighting a trainer met while reading; every
+  // "trainer battle" rule (no catching, no running, trainer IVs and XP)
+  // applies, with the team in roadTeam_.
+  static constexpr uint8_t ROAD_TRAINER_INDEX = 0xFF;
+  pokemon::TrainerTeam roadTeam_{};
+  uint8_t roadTrainerClass_ = 0;
+  uint8_t gymChallengeTeamProgress_ = 0;  // index of the opponent team member currently out
+  // gymTeamOrder_[i] is which real gymTeamFor(gymChallengeIndex_) index sits
+  // at position i - identity-initialized (gymTeamOrder_[i] == i) whenever a
+  // gym challenge starts, in enterGymBattle(). The trainer AI's own
+  // voluntary switch (see trainerAiShouldActInsteadOfMoveThisTurn()) swaps
+  // entries in the still-to-fight suffix (indices > gymChallengeTeamProgress_)
+  // rather than ever changing what gymChallengeTeamProgress_ itself means -
+  // it's still simply "how many of the trainer's team have been defeated,"
+  // now reached through this indirection instead of indexing the team
+  // directly. Never touched for a wild encounter (gymChallengeIndex_ == 0).
+  std::array<uint8_t, pokemon::MAX_GYM_TEAM_SIZE> gymTeamOrder_{};
+  // How many more times this trainer battle's AI can use a healing item
+  // (see trainerAiShouldActInsteadOfMoveThisTurn()) - reset once per gym
+  // challenge in enterGymBattle(), never replenished mid-fight. A small,
+  // deliberately simplified stand-in for the real games' actual per-trainer
+  // item stock, which this project has no data for at all.
+  uint8_t opponentHealChargesRemaining_ = 0;
+  // A gym team member the trainer withdrew (trainerAiShouldActInsteadOfMoveThisTurn())
+  // keeps its HP, PP and major status for when it comes back, indexed by its
+  // real gymTeamFor() index - it used to come back freshly built at full HP.
+  struct GymBenchState {
+    bool saved = false;
+    uint16_t currentHp = 0;
+    pokemon::Ailment status = pokemon::Ailment::None;
+    uint8_t statusTurns = 0;
+    std::array<uint8_t, pokemon::BATTLE_MOVE_SLOTS> pp{};
+  };
+  std::array<GymBenchState, pokemon::MAX_GYM_TEAM_SIZE> gymBench_{};
+  int battlePartySlot_ = 0;               // which snapshot_.party[] slot is currently battlePlayer_
+  bool forcedBattleSwitch_ = false;       // true while the active Pokemon just fainted - Back can't cancel out
+  // How many times RUN has already failed THIS wild battle - Gen 1's real
+  // escape odds improve with each failed attempt (see
+  // PokemonService::attemptRunFromBattle()'s doc comment). Reset to 0 at the
+  // start of every new battle (enterBattle()/enterGymBattle(), though a gym
+  // RUN never consults this at all - see Screen::Battle's RUN handling).
+  uint8_t battleRunAttempts_ = 0;
   std::array<freeink::ui::ListItem, ROW_CAPACITY> rows_{};
   std::array<std::array<char, 56>, ROW_CAPACITY> labels_{};
   std::array<std::array<char, 32>, ROW_CAPACITY> values_{};
+  // Backing storage for ListItem::subtitle on rows that need one (Pokedex's
+  // dex number, BagMachine's taught-move name) - mirrors labels_/values_.
+  // GymList's own subtitle ("Elite Four"/"Champion") reuses values_ instead
+  // since its value slot is a static tr() string with no buffer of its own
+  // to free up; these screens' value slots aren't always free that way, so
+  // they get this dedicated buffer.
+  // Room for a translated item description (Bag rows), not just a short tag.
+  std::array<std::array<char, 192>, ROW_CAPACITY> subtitles_{};
+  bool itemPanelOpen_ = false;
+  int itemPanelChoice_ = 0;
   Rect listBounds_{};
   int rowHeight_ = 0;
   bool cleanRefreshNeeded_ = true;

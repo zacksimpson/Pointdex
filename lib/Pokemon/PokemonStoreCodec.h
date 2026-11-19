@@ -9,9 +9,51 @@
 namespace pokemon {
 
 constexpr uint16_t POKEMON_SNAPSHOT_VERSION_V1 = 1;
-constexpr uint16_t POKEMON_SNAPSHOT_VERSION = 2;
+constexpr uint16_t POKEMON_SNAPSHOT_VERSION_V2 = 2;
+constexpr uint16_t POKEMON_SNAPSHOT_VERSION_V3 = 3;
+constexpr uint16_t POKEMON_SNAPSHOT_VERSION_V4 = 4;
+constexpr uint16_t POKEMON_SNAPSHOT_VERSION_V5 = 5;
+constexpr uint16_t POKEMON_SNAPSHOT_VERSION_V6 = 6;
+constexpr uint16_t POKEMON_SNAPSHOT_VERSION_V7 = 7;
+constexpr uint16_t POKEMON_SNAPSHOT_VERSION_V8 = 8;
+constexpr uint16_t POKEMON_SNAPSHOT_VERSION_V9 = 9;
+constexpr uint16_t POKEMON_SNAPSHOT_VERSION_V10 = 10;
+constexpr uint16_t POKEMON_SNAPSHOT_VERSION = 11;
 constexpr size_t POKEMON_STATE_V1_BYTES = 96;
-constexpr size_t POKEMON_STATE_BYTES = 116;
+constexpr size_t POKEMON_STATE_V2_BYTES = 116;
+// v3 appends bagCounts[POKEMON_BAG_SLOT_COUNT] and battleProgress (uint16_t)
+// after the v2 layout; see PokemonState in PokemonTypes.h.
+constexpr size_t POKEMON_STATE_V3_BYTES = POKEMON_STATE_V2_BYTES + POKEMON_BAG_SLOT_COUNT + 2;
+// v4 (Stage 23) appends ballMisses/medicineMisses/machineMisses (uint8_t each) -
+// pity counters for the three item-drop tracks that gained their own
+// guaranteed-after-N-misses roll (see PokemonGame.cpp) - after the v3 layout.
+constexpr size_t POKEMON_STATE_V4_BYTES = POKEMON_STATE_V3_BYTES + 3;
+// v5 (PP Up) appends ppUpCount (uint8_t) - see PokemonState in PokemonTypes.h.
+constexpr size_t POKEMON_STATE_V5_BYTES = POKEMON_STATE_V4_BYTES + 1;
+// v6 (battle-boost items) appends battleBoostCounts[POKEMON_BATTLE_BOOST_ITEM_COUNT]
+// (uint8_t each) - see PokemonState in PokemonTypes.h.
+constexpr size_t POKEMON_STATE_V6_BYTES = POKEMON_STATE_V5_BYTES + POKEMON_BATTLE_BOOST_ITEM_COUNT;
+// v7 (EV vitamins) appends vitaminCounts[POKEMON_VITAMIN_ITEM_COUNT] (uint8_t each) -
+// see PokemonState in PokemonTypes.h.
+constexpr size_t POKEMON_STATE_V7_BYTES = POKEMON_STATE_V6_BYTES + POKEMON_VITAMIN_ITEM_COUNT;
+// v8 (bigger pending-event queue) appends the pending-event slots past the
+// original 3 (PENDING_EVENT_V8_CAPACITY - PENDING_EVENT_LEGACY_SLOTS of them,
+// PENDING_EVENT_BYTES each) after the v7 layout. The first 3 stay where they
+// always were, so growing the queue never shifts any other field.
+constexpr size_t POKEMON_PENDING_EVENT_BYTES = 10;
+constexpr size_t POKEMON_STATE_V8_BYTES =
+    POKEMON_STATE_V7_BYTES + (PENDING_EVENT_V8_CAPACITY - PENDING_EVENT_LEGACY_SLOTS) * POKEMON_PENDING_EVENT_BYTES;
+// v9 (bigger pending-event queue, again) appends the further slots past v8's
+// own fixed 10, same append-only pattern - v8's own region never shifts.
+constexpr size_t POKEMON_STATE_V9_BYTES =
+    POKEMON_STATE_V8_BYTES + (PENDING_EVENT_CAPACITY - PENDING_EVENT_V8_CAPACITY) * POKEMON_PENDING_EVENT_BYTES;
+// v10 (recorded starter species) appends starterSpeciesId (uint8_t) - see
+// PokemonState in PokemonTypes.h.
+constexpr size_t POKEMON_STATE_V10_BYTES = POKEMON_STATE_V9_BYTES + 1;
+// v11 (road trainers, items straight to the bag) appends trainerMisses
+// (uint8_t) and receivedItems[POKEMON_ITEM_ID_MAX] (uint8_t each) - see
+// PokemonState in PokemonTypes.h. It also allows PendingEventKind::Trainer.
+constexpr size_t POKEMON_STATE_BYTES = POKEMON_STATE_V10_BYTES + 1 + POKEMON_ITEM_ID_MAX;
 using StateBytes = std::array<uint8_t, POKEMON_STATE_BYTES>;
 
 constexpr size_t POKEMON_SNAPSHOT_HEADER_BYTES = 24;

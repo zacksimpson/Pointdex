@@ -1,13 +1,64 @@
 #pragma once
 
+#include <PokemonBattle.h>
 #include <PokemonTracker.h>
 
 #include <array>
 #include <string_view>
 
+#include "PokemonBattleStore.h"
+#include "PokemonHallOfFameStore.h"
+#include "PokemonIvEvStore.h"
+#include "PokemonMovesetStore.h"
 #include "PokemonStore.h"
 
 namespace pokemon {
+
+// The PC Box's own capacity - distinct from (and much smaller than)
+// PokemonStore's total-record hard ceiling of 1024 (see
+// PokemonService::resolveEncounter()'s own comment). POKEMON_IVEV_MAX_ENTRIES
+// (PokemonIvEvStoreCodec.h) is deliberately this value PLUS PARTY_SIZE (518,
+// not 512) - the true maximum number of simultaneously-live records is
+// PARTY_SIZE in the party plus this many in the Box, since the catch gate
+// only blocks once BOTH are full - so every live record always has room for
+// a persisted IV/EV entry.
+constexpr uint32_t PC_BOX_MAX_RECORDS = 512;
+
+// The one place the "catch has nowhere to go" rule lives: a catch is only
+// blocked once BOTH the party is full and the Box is at its cap (a full Box
+// never blocks catching into an empty party slot). `totalRecords` counts every
+// owned record, party included. resolveEncounter() enforces it; the battle UI
+// calls the same function before spending a Ball so the two can never drift.
+constexpr bool catchBlockedByFullBox(const size_t partyCount, const size_t totalRecords) {
+  return partyCount >= PARTY_SIZE && totalRecords >= partyCount && totalRecords - partyCount >= PC_BOX_MAX_RECORDS;
+}
+
+enum class TeachMoveOutcome : uint8_t {
+  Learned,
+  AlreadyKnown,
+  Incompatible,  // this species can't learn moveId via TM/HM at all (canLearnViaMachine == false)
+  MovesetFull,   // caller must retry with a replaceSlot in [0, BATTLE_MOVE_SLOTS)
+  Failed,
+};
+
+// Ether/Max Ether restore one move's PP (the player picks it), unlike
+// Elixir/Max Elixir which restore every move.
+constexpr bool restoresSingleMovePp(const uint8_t itemId) { return itemId == 25 || itemId == 26; }
+
+struct ConsumableUse {
+  // The move slot an Ether/Max Ether restores; required for those two, ignored otherwise.
+  int moveSlot = -1;
+  // Confusion is volatile: it only matters on the Pokemon currently fighting.
+  // Anywhere else a persisted Confusion is stale, so it is dropped rather than
+  // letting a Full Heal be spent "curing" it.
+  bool confusionIsLive = false;
+};
+
+enum class UseConsumableOutcome : uint8_t {
+  Applied,
+  NotApplicable,
+  Failed,
+};
 
 enum class ServiceStatus : uint8_t {
   Ok,
@@ -19,6 +70,11 @@ enum class ServiceStatus : uint8_t {
   LastPokemon,
   NotApplicable,
   StorageError,
+  // The party is full AND the PC Box is at its own PC_BOX_MAX_RECORDS cap -
+  // there's nowhere left to put a new catch. Distinct from PartyFull (an
+  // unrelated party-management error) so the UI can show a dedicated
+  // "release some Pokemon first" message instead of a generic one.
+  BoxFull,
 };
 
 struct PokemonSnapshot {
@@ -36,14 +92,23 @@ struct PokemonDashboardSnapshot {
 
 class PokemonService {
  public:
-  PokemonService(PokemonStore& store, RandomSource random)
-      : store_(store), random_(random), tracker_(&PokemonService::creditFromTracker, this) {}
+  PokemonService(PokemonStore& store, PokemonBattleStore& battleStore, PokemonIvEvStore& ivEvStore,
+                 PokemonHallOfFameStore& hallOfFameStore, RandomSource random)
+      : store_(store),
+        battleStore_(battleStore),
+        ivEvStore_(ivEvStore),
+        hallOfFameStore_(hallOfFameStore),
+        random_(random),
+        tracker_(&PokemonService::creditFromTracker, this) {}
 
   bool beginReadingSession();
   void setBookProgressPercent(uint8_t percent);
   void onSuccessfulPageTurn(uint32_t nowMs);
   void checkpointIfDue(uint32_t nowMs);
   void flushOnExit(uint32_t nowMs);
+  // Seconds of reading credited in the open session (0 with none open): the
+  // simulator smoke test checks the reader really feeds the game.
+  uint32_t sessionCreditedSeconds() const { return readingSessionActive_ ? tracker_.creditedSeconds() : 0; }
 
   bool creditMinutes(uint16_t minutes, uint8_t bookProgressPercent);
 
@@ -54,24 +119,351 @@ class PokemonService {
   ServiceStatus movePartyMember(uint8_t fromSlot, uint8_t toSlot);
   ServiceStatus depositPokemon(uint32_t recordId);
   ServiceStatus withdrawPokemon(uint32_t recordId);
+  // Permanently deletes a PC Box Pokemon (see pokemon::releaseRecord() for
+  // the full rejection rules - party members and, indirectly, the leader
+  // are never eligible). Also best-effort frees its battle-store and IV/EV
+  // slots. NotApplicable if it's in the party or the pure-logic layer
+  // otherwise rejects it; NotFound if recordId doesn't exist at all.
+  ServiceStatus releasePokemon(uint32_t recordId);
+  // Marks a species "seen" in the Pokedex directly - wild encounters
+  // already do this the moment the encounter is generated
+  // (finalizeEncounter(), before battle even starts), but a gym/Elite
+  // Four/Champion trainer's fixed roster has no equivalent earlier step,
+  // so PokemonActivity::setupBattleOpponent() calls this instead. A no-op
+  // (still ServiceStatus::Ok) if the species is already marked.
+  ServiceStatus markSpeciesSeen(uint16_t speciesId);
   ServiceStatus loadDashboardSnapshot(PokemonDashboardSnapshot& output);
   ServiceStatus readPcPage(PcOrder order, size_t offset, std::span<PokemonRecord> output, size_t& count);
-  ServiceStatus resolveEncounter(EncounterChoice choice, uint32_t& caughtRecordId);
+  // `battleIvs`, when given, are the IVs the wild Pokemon fought with; a catch keeps
+  // them instead of rolling new ones, so its stats don't change the moment it's caught.
+  ServiceStatus resolveEncounter(EncounterChoice choice, uint32_t& caughtRecordId,
+                                 const std::array<uint8_t, STAT_COUNT>* battleIvs = nullptr);
   ServiceStatus acknowledgeItem();
+  // Ends the front Trainer event (PendingEventKind::Trainer) after its
+  // battle, or when the player declines it. A won battle leaves an item
+  // (grantTrainerReward()) in the bag in the same write; `rewardItemId` is
+  // that item, or 0.
+  ServiceStatus resolveTrainer(bool won, uint8_t& rewardItemId);
+  // Empties the "items received" summary once the player has seen it
+  // (NotApplicable when it was already empty).
+  ServiceStatus clearReceivedItems();
   ServiceStatus resolveEvolution(EvolutionChoice choice);
+  // Resolves the front MoveLearn event (PendingEventKind::MoveLearn):
+  // replaceSlot in [0, BATTLE_MOVE_SLOTS) teaches the move into that slot,
+  // overwriting whatever was there; any other value (e.g. -1) skips
+  // learning it. Either way, the pending event is dequeued.
+  ServiceStatus resolveMoveLearn(int replaceSlot);
   ServiceStatus setEvolutionPrompts(uint32_t recordId, bool enabled);
   ServiceStatus useEvolutionItem(uint32_t recordId, EvolutionItem item);
   ServiceStatus reset();
 
+  // Bag (items 7..POKEMON_ITEM_ID_MAX; the 6 evolution stones/Link Cable
+  // stay reachable through readRecord()'s PokemonState.itemCounts as
+  // before). Decrements by 1 (e.g. using a Potion or a TM); returns
+  // NotApplicable if the item id is out of range or its count is already 0.
+  ServiceStatus consumeBagItem(uint8_t itemId);
+
+  // Gym/Elite Four progress. gymIndex is 1-8 for the gyms in challenge
+  // order, 9-GYM_COUNT for the Elite Four. Enforces the linear unlock rule:
+  // gym N requires gyms 1..N-1 already defeated; an Elite Four member
+  // requires all 8 gym bits set. Badges are a display-only achievement -
+  // this does not touch XP, encounter odds, or any PokemonGame.cpp rule.
+  ServiceStatus markGymDefeated(uint8_t gymIndex);
+
+  // Loads `recordId`'s live battle state (moves/PP/HP/status). If the
+  // battle store has no entry for it (never fought, or the entry was lost
+  // to corruption), synthesizes one from the record's current level and
+  // species learnset at full HP/PP with no status, persists it, and
+  // returns that - callers never need their own fallback path.
+  ServiceStatus loadBattleEntry(uint32_t recordId, BattleRecordEntry& output);
+  ServiceStatus saveBattleEntry(const BattleRecordEntry& entry);
+
+  // Read-only lookup of a Pokemon's currently known moveset for display
+  // (Summary screen): returns the persisted battle-store entry if one
+  // exists, else what it WOULD synthesize to from the record's current
+  // level/learnset - unlike loadBattleEntry, this never creates or
+  // persists anything, so merely viewing a Pokemon never writes to SD.
+  BattleRecordEntry peekBattleMoves(const PokemonRecord& record) const;
+
+  // Teaches moveId to recordId via TM/HM. Checks canLearnViaMachine() first
+  // (Stage 12 - a species can only learn the TMs/HMs real Pokemon Red allows,
+  // not every move in the game). Learns straight into an empty move slot
+  // when there is one; if the moveset is already full (and doesn't already
+  // know the move), returns MovesetFull without changing anything - the
+  // caller must then ask the player which slot to overwrite and retry with
+  // replaceSlot in [0, BATTLE_MOVE_SLOTS) (Stage 12; mirrors resolveMoveLearn's
+  // two-call shape).
+  TeachMoveOutcome teachMove(uint32_t recordId, uint8_t moveId, int replaceSlot = -1);
+
+  // Manual evolution through an already-met Level rule, without waiting for a
+  // queued prompt. NotApplicable if the Pokemon has no such rule available.
+  ServiceStatus evolveNow(uint32_t recordId);
+
+  // Same operation as teachMove(), but also spends `itemId` from the bag as
+  // part of it: resolves whether the move can be learned (and into which
+  // slot) first, without writing anything, THEN consumes the item, THEN
+  // writes the moveset - only ever spending the TM/HM once the move is known
+  // to be learnable. AlreadyKnown/Incompatible/MovesetFull are all returned
+  // with nothing consumed, same as teachMove(). If the moveset write still
+  // fails after the item was spent (round 8 audit item C - a caller doing
+  // teachMove() then a separate consumeBagItem() could keep the learned move
+  // even if that second write failed), the item is handed back and Failed is
+  // returned - same reasoning as usePpUp()/useVitamin().
+  TeachMoveOutcome teachMoveAndConsumeItem(uint32_t recordId, uint8_t moveId, uint8_t itemId, int replaceSlot = -1);
+
+  // Player-driven moveset management (Party > Actions > Moves): overwrites
+  // one move slot with moveId unconditionally, at full PP. The caller (the
+  // Moveset UI) is responsible for only ever offering moves the Pokemon can
+  // actually learn (its own learnset, at or below its current level) and
+  // that aren't already known in another slot - unlike teachMove/
+  // resolveMoveLearn there is no AlreadyKnown/MovesetFull check here, since
+  // the UI's own move-picker list already excludes both cases by construction.
+  ServiceStatus learnMoveIntoSlot(uint32_t recordId, uint8_t slot, uint8_t moveId);
+
+  // Clears one move slot to empty (Stage 12 - the Moveset screen's "Forget").
+  // Refuses to clear a Pokemon's last remaining move (NotApplicable) - a
+  // Pokemon always has at least one move in the real games too.
+  ServiceStatus forgetMove(uint32_t recordId, uint8_t slot);
+
+  // PP Up: raises `slot`'s max PP (see maxPpFor() in PokemonBattle.h),
+  // 20% of the move's base PP per use, up to 3 uses. Returns NotApplicable
+  // if the slot is empty or already at 3 uses (the caller should not have
+  // offered it in that case, but this is checked regardless). If the slot's
+  // current PP was already at its old max, it's topped up to the new max too
+  // (a full move stays full); otherwise current PP is left untouched -
+  // matches the real games exactly.
+  ServiceStatus applyPpUp(uint32_t recordId, uint8_t slot);
+
+  // Spends one PP Up from the bag and applies it to `slot` as one operation:
+  // checks the slot can take it (NotApplicable, nothing written, if not),
+  // consumes the item, then applies. The order matters - applying first and
+  // consuming second meant a failed second write kept the boost without
+  // spending the item. If the apply write fails after the item was consumed,
+  // the item is handed back (best effort) and StorageError is returned.
+  ServiceStatus usePpUp(uint32_t recordId, uint8_t slot);
+
+  // Spends one EV vitamin (itemId in VITAMIN_ITEM_ID_FIRST..LAST) on recordId:
+  // +VITAMIN_EV_PER_USE to the matching stat's EV (HP Up -> HP, Protein ->
+  // Attack, Iron -> Defense, Calcium -> Special, Carbos -> Speed), capped at
+  // 255. Returns NotApplicable, with nothing consumed, once that stat's EV is
+  // already at VITAMIN_EV_CAP or more (battles can still push it higher).
+  // Same order as usePpUp(): check, consume the item, apply, and hand the item
+  // back if the apply write fails.
+  ServiceStatus useVitamin(uint32_t recordId, uint8_t itemId);
+
+  // Uses one Medicine-pocket item (ItemCategory::Medicine/StatusCure/
+  // PPRestore/Candy - the "Bag > Medicine" category; Stone/Ball/Machine
+  // items go through useEvolutionItem/teachMove/attemptBattleCatch
+  // instead) on recordId. Medicine heals HP by effectValue and cures
+  // curesAilment if set; StatusCure only cures; PPRestore restores
+  // effectValue PP to every known move slot (Gen1's Ether/Elixir split by
+  // single-vs-all move isn't modeled - both simply top up every slot, a
+  // deliberate simplification); Candy adds one level's worth of XP and
+  // may itself queue a MoveLearn event exactly like reading credit does,
+  // but does NOT check for evolution (that only runs inside
+  // creditMinutes() - a Candy-earned evolution is caught on the very next
+  // reading credit instead of duplicating that private check here).
+  // Returns NotApplicable when the item would have no effect (already at
+  // full HP/PP, no matching status, already level 100) without consuming
+  // anything. Does NOT itself touch the bag - UI callers that need the item
+  // actually spent should use useConsumableAndConsumeItem() instead, which
+  // gets the check/consume/apply ordering right; this bare version stays
+  // around for callers (mid-battle item use, tests) that manage the bag
+  // decrement themselves for other reasons.
+  // `use` carries the two per-use details a few items need (see ConsumableUse).
+  UseConsumableOutcome useConsumable(uint32_t recordId, uint8_t itemId, ConsumableUse use = {});
+
+  // Same effect as useConsumable(), but also spends `itemId` from the bag as
+  // part of it, in the right order: checks whether the item would have any
+  // effect first (nothing written), THEN consumes the item, THEN applies the
+  // effect - only ever spending the item once it's known to do something.
+  // NotApplicable/Failed from that first check leaves the bag untouched. If
+  // the effect's own write still fails after the item was spent (round 8
+  // audit item C - a caller doing useConsumable() then a separate
+  // consumeBagItem() could keep the healed HP/cured status/leveled-up Candy
+  // even if that second write failed), the item is handed back and Failed is
+  // returned - same reasoning as usePpUp()/useVitamin().
+  UseConsumableOutcome useConsumableAndConsumeItem(uint32_t recordId, uint8_t itemId, ConsumableUse use = {});
+
+  // Thin wrappers around the pure engine (PokemonBattle.h) using this
+  // service's own RandomSource, so the UI layer never touches RNG directly -
+  // consistent with how every PokemonGame.cpp rule is only ever invoked
+  // through a PokemonService method.
+  BattleTurnResult resolveBattleTurn(BattleCombatant& player, BattleCombatant& opponent, uint8_t playerMoveSlot,
+                                     bool wildEncounter = false);
+  // For a voluntary switch or mid-battle item use - both cost the whole
+  // turn in Gen 1 (no Speed check), so only the opponent acts.
+  BattleTurnResult resolveOpponentOnlyTurn(BattleCombatant& player, BattleCombatant& opponent);
+  // Mirror image: the OPPONENT spent its turn on a trainer-AI heal or
+  // voluntary switch, so only the player's own chosen move resolves.
+  BattleTurnResult resolvePlayerOnlyTurn(BattleCombatant& player, BattleCombatant& opponent, uint8_t playerMoveSlot);
+  bool attemptBattleCatch(const BattleCombatant& wild, BallKind ball);
+  // Wild-battle-only run-away odds (see attemptRun()'s doc comment in
+  // PokemonBattle.h) - a gym/Elite Four/Champion RUN is always an
+  // unconditional forfeit at the UI layer and never calls this.
+  bool attemptRunFromBattle(const BattleCombatant& player, const BattleCombatant& opponent, uint8_t attemptCount);
+  // A gym/Elite Four/Champion trainer's fixed roster carries no gender of
+  // its own (unlike a wild encounter's PendingEvent, already rolled at
+  // encounter time) - rolls one by the species' real gender ratio so the
+  // Battle HUD can still show it. Falls back to Gender::Unknown (shown as
+  // nothing) if speciesId is invalid.
+  Gender rollGenderFor(uint16_t speciesId);
+  // A fresh, unpersisted IV roll for a wild encounter's own BattleCombatant
+  // at fight time - a successful catch keeps it (resolveEncounter()'s
+  // `battleIvs`). `shiny` selects rollShinyIvSet() (12-15
+  // per stat) instead of the normal 0-15 roll.
+  std::array<uint8_t, STAT_COUNT> rollWildIv(bool shiny = false);
+  // Grants battleVictoryXp(opponentLevel, its own level) to recordId (the
+  // Pokemon active when the battle was won), capped at MAXIMUM_TOTAL_XP same
+  // as reading credit, and queues any move newly available from the level(s)
+  // gained - a no-op for the XP/level part (still ServiceStatus::Ok) once
+  // already at level 100. Also accumulates EVs from opponentSpeciesId's
+  // per-stat EV yield (BaseStats::evHp/.../evSpeed), saturating at 255 per
+  // stat - this part is NOT gated by the level-100 XP cap, matching how EVs
+  // and XP are independent quantities in the real games. `evOnly` (a road
+  // trainer's Pokemon, whose XP comes once per battle via awardFixedXp())
+  // grants the EVs alone.
+  ServiceStatus awardBattleXp(uint32_t recordId, uint8_t opponentLevel, bool evOnly,
+                             uint16_t opponentSpeciesId);
+  // Grants a fixed amount of XP to recordId with the same level-up handling
+  // as awardBattleXp() (moves to learn, evolution prompt, HP raised by the
+  // max-HP gain) - a beaten road trainer's ROAD_TRAINER_VICTORY_XP.
+  ServiceStatus awardFixedXp(uint32_t recordId, uint32_t xp);
+
+  // A Pokemon's permanent IV/EV pair (see PokemonIvEvStoreCodec.h). Rolls a
+  // fresh IV set (EV all 0) and persists it the first time this is called
+  // for a given recordId - covers both a brand-new record (just caught/
+  // picked as a starter) and backfilling a record created before this
+  // mechanic existed (both cases look identical: no side-file entry yet).
+  // Best-effort: if persisting the fresh roll fails, the SAME rolled value
+  // is still returned and reused on every subsequent call (see
+  // pendingIvEvRolls_) rather than rolling a brand new one each time -
+  // callers like the Party/Summary screens call this on every render, so
+  // re-rolling on every failed attempt showed up as a Pokemon's displayed
+  // max HP flickering between values on every redraw once the store's
+  // write could genuinely fail under real-device heap pressure (see
+  // CHANGELOG v0.18.x). Persistence itself is still retried each call, so
+  // it catches up to disk as soon as a write succeeds. `shiny` (pass
+  // isRecordShiny(record)) selects rollShinyIvSet() for a brand-new roll
+  // instead of the normal one - only matters the very first time a shiny
+  // record's IV/EV is looked up, since every later call finds the already-
+  // persisted entry regardless of this flag.
+  IvEvEntry ensureIvEv(uint32_t recordId, bool shiny = false);
+  // True when the stored record is shiny - ensureIvEv() consults this itself so a first-time roll is right even if
+  // the caller didn't pass `shiny`.
+  bool recordIsShiny(uint32_t recordId);
+  // Read-only: never rolls or persists anything, for display/HP-calc paths
+  // that must not write just from being looked at (mirrors peekBattleMoves()
+  // vs loadBattleEntry()). Returns a zero IV/EV entry if none exists yet -
+  // exactly today's pre-this-feature stats, until the record's first real
+  // battle/creation calls ensureIvEv() for real.
+  IvEvEntry peekIvEv(uint32_t recordId) const;
+
+  // Snapshots the current party (species, nickname, level, gender, shiny -
+  // see HallOfFameMember) plus lifetimeMinutes into the Hall of Fame store,
+  // the moment the Champion is defeated for the first time. Called only from
+  // PokemonActivity::finishGymChallenge() when gymIndex == CHAMPION_GYM_INDEX
+  // and the win is real; the gym itself can never be re-fought once
+  // defeated, so this should only ever be reachable once per playthrough,
+  // but this method is idempotent regardless - a second call is a no-op
+  // (NotApplicable, nothing touched) rather than overwriting the frozen
+  // snapshot. A party record that fails to read is skipped rather than
+  // failing the whole capture (best-effort, matching upsertEntries()'s own
+  // one-bad-entry-shouldn't-lose-the-rest philosophy) - vanishingly unlikely
+  // right after a real battle win, but there's no reason a transient read
+  // glitch here should cost the player their whole Hall of Fame entry.
+  ServiceStatus captureHallOfFame();
+  // Read-only: never writes. Returns a default (HallOfFameState{}, `cleared`
+  // false) if no snapshot has ever been captured - callers check `.cleared`
+  // rather than needing a separate "has one" query.
+  HallOfFameState peekHallOfFame() const;
+
  private:
   ServiceStatus prepareStore();
   ServiceStatus loadReadyState(PokemonState& output);
+  BattleRecordEntry synthesizeBattleEntry(const PokemonRecord& record, const IvEvEntry& ivEv) const;
+  // Inverse of consumeBagItem(): hands one `itemId` back to the bag, capped
+  // at each counter's own max like the other refund paths (usePpUp()/
+  // useVitamin()). Used by teachMoveAndConsumeItem()/
+  // useConsumableAndConsumeItem() when the item was already spent but the
+  // effect's own write then failed.
+  ServiceStatus refundBagItem(uint8_t itemId);
+  // Shared by teachMove()/teachMoveAndConsumeItem(): resolves AlreadyKnown/
+  // Incompatible/MovesetFull, or the slot the move would land in, without
+  // writing anything. Returns TeachMoveOutcome::Learned as a "proceed"
+  // sentinel when a slot was found - the caller still has to do the actual
+  // write.
+  TeachMoveOutcome resolveTeachTarget(uint32_t recordId, uint8_t moveId, int replaceSlot, BattleRecordEntry& entry,
+                                      int& targetSlot);
+  // Shared by useConsumable()/useConsumableAndConsumeItem(): dryRun=true
+  // stops just short of the one write useConsumable() would make (the
+  // Candy/Medicine/StatusCure/PPRestore branches share this same read-then-
+  // decide-then-write shape), so callers can check applicability before
+  // touching the bag without duplicating all of that branching.
+  UseConsumableOutcome useConsumableImpl(uint32_t recordId, uint8_t itemId, bool dryRun, ConsumableUse use);
+  void healPartyOnRead(const PokemonState& state, uint16_t minutes, uint8_t previousMinuteRemainder);
+  // awardBattleXp()/awardFixedXp()'s shared tail: adds xpGained (capped at
+  // MAXIMUM_TOTAL_XP), queues moves/evolution for a level gained, commits,
+  // and raises current HP by the max-HP gain over `oldMaxHp`.
+  ServiceStatus grantXp(PokemonRecord record, uint32_t xpGained, uint16_t oldMaxHp);
+  uint16_t currentMaxHp(const PokemonRecord& record);
+  // Every TRAINER_CHECK_MINUTES of lifetime reading, one chance of meeting a
+  // road trainer (rollRoadTrainer()), levelled by the book's progress and
+  // the party's average level (trainerLevelFor()). `leader` is the in-memory
+  // leader, possibly just levelled up by this credit.
+  void maybeQueueTrainer(PokemonState& state, const PokemonRecord& leader, uint32_t lifetimeMinutesBefore,
+                         uint8_t bookProgressPercent);
+  // Checks the leader's learnset for any move newly available between
+  // previousLevel (exclusive) and currentLevel (inclusive): auto-fills an
+  // empty move slot if there's room, or queues a MoveLearn event for the UI
+  // to resolve if the moveset is already full. A Pokemon with no battle
+  // entry yet is skipped - its first battle synthesizes an up-to-date
+  // moveset for its current level already, so there is nothing to catch up.
+  // persistMoves=false skips the battle-store write (used by dry-run probes,
+  // which must not have side effects).
+  void queueMoveLearnIfNeeded(PokemonState& state, const PokemonRecord& leader, uint8_t previousLevel,
+                              uint8_t currentLevel, bool queuePrompts = true, bool persistMoves = true);
+  // Every write of a BattleRecordEntry goes through here. The battle store
+  // (party-sized, HP/PP/status) is always written; the moveset store (moves +
+  // PP Ups, PC Box included) is kept in step with it, but is only CREATED for
+  // a Pokemon once its moveset is actually customised (movesetChanged), never
+  // for a default one - and once an entry exists it is updated whenever
+  // moves/PP Ups differ. A failure to sync the moveset store is logged but
+  // not returned: the battle store, which the UI reads first, has the data.
+  bool persistBattleEntry(const BattleRecordEntry& entry, bool movesetChanged);
+  // A level-up adds its max-HP gain to current HP as well (real Gen 1). Only touches
+  // an existing battle entry of a Pokemon that is still standing; one without an entry
+  // synthesizes at full HP anyway. Best-effort like the other battle-store writes here.
+  void raiseCurrentHpByMaxHpGain(uint32_t recordId, uint16_t oldMaxHp, uint16_t newMaxHp);
+  // Entries written before the moveset store existed may hold customised
+  // movesets with no copy there yet; copies them across. Called right before a
+  // battle-store eviction, the only place such an entry can otherwise be lost.
+  void backfillMovesetStoreFromBattleStore();
   static bool creditFromTracker(void* context, uint16_t minutes, uint8_t bookProgressPercent);
+  IvEvEntry* findPendingIvEvRoll(uint32_t recordId);
+  void cachePendingIvEvRoll(const IvEvEntry& entry);
+  void clearPendingIvEvRoll(uint32_t recordId);
 
   PokemonStore& store_;
+  PokemonBattleStore& battleStore_;
+  PokemonIvEvStore& ivEvStore_;
+  PokemonHallOfFameStore& hallOfFameStore_;
+  // Owned here rather than injected: the service is its only user, and a
+  // per-service instance keeps every test's store state independent.
+  PokemonMovesetStore movesetStore_;
   RandomSource random_{};
   PokemonTracker tracker_;
   bool readingSessionActive_ = false;
+  // See ensureIvEv()'s doc comment - a small in-memory-only cache of rolled
+  // IV/EV entries that haven't made it to ivEvStore_ yet, keyed by recordId.
+  // 16 is comfortably above PARTY_SIZE (6) with headroom for the Party
+  // screen, a Summary, and a battle setup all touching different records in
+  // the same session; a full cache just evicts the oldest entry rather than
+  // failing, which only brings back the (rare, pre-existing) reroll
+  // possibility for whichever record gets evicted.
+  static constexpr size_t PENDING_IV_EV_CAPACITY = 16;
+  std::array<IvEvEntry, PENDING_IV_EV_CAPACITY> pendingIvEvRolls_{};
+  size_t pendingIvEvCount_ = 0;
 };
 
 PokemonService& devicePokemonService();

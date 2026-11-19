@@ -22,12 +22,43 @@ int pokemonCenteredOffset(const int containerExtent, const int contentExtent) {
 
 int pokemonRightAlignedX(const int rightEdge, const int contentWidth) { return rightEdge - std::max(0, contentWidth); }
 
+int pokemonTrainerCardGrid(PokemonUiRect* out, const int capacity, const int screenWidth, const int top,
+                           const int bottom, const int tileCount, const int columns, const int maxTileHeight) {
+  constexpr int sidePadding = 16;
+  constexpr int gap = 12;
+  constexpr int minTileHeight = 40;
+  if (out == nullptr || capacity < tileCount || tileCount <= 0 || columns <= 0) return 0;
+  const int tileWidth = (screenWidth - sidePadding * 2 - gap * (columns - 1)) / columns;
+  const int rows = (tileCount + columns - 1) / columns;
+  const int tileHeight = std::min(maxTileHeight, (bottom - top - gap * (rows - 1)) / rows);
+  if (tileWidth <= 0 || tileHeight < minTileHeight) return 0;
+
+  const int fullRowWidth = tileWidth * columns + gap * (columns - 1);
+  for (int index = 0; index < tileCount; ++index) {
+    const int row = index / columns;
+    const int column = index % columns;
+    const int inRow = row == rows - 1 ? tileCount - row * columns : columns;
+    const int rowWidth = tileWidth * inRow + gap * (inRow - 1);
+    const int rowX = sidePadding + (fullRowWidth - rowWidth) / 2;
+    out[index] = PokemonUiRect{rowX + column * (tileWidth + gap), top + row * (tileHeight + gap), tileWidth, tileHeight};
+  }
+  return tileCount;
+}
+
 PokemonListPresentation pokemonListPresentation(const bool hasArtwork) {
   freeink::ui::StyleSet styles = freeink::ui::selectedPlainListRowStyles();
   styles.selected = styles.normal;
   styles.focused = styles.normal;
   styles.active = styles.normal;
-  return PokemonListPresentation{styles, hasArtwork ? 104 : 16, hasArtwork ? 86 : 0};
+  // Artwork rows read left to right as marker, then icon, then text: the
+  // selection triangle sits in its own small reserved strip at the row's
+  // left edge (markerInset=4) before the icon (PokemonActivity.cpp's
+  // renderRowArt() shifts the icon right to clear it) rather than squeezed
+  // into the ~1px gap the icon and marker used to leave between them, which
+  // let the marker land on top of whatever the icon's row drew immediately
+  // after it (a wide HP bar made this obvious, but the tight gap existed
+  // regardless of what followed the icon).
+  return PokemonListPresentation{styles, hasArtwork ? 112 : 16, hasArtwork ? 4 : 0};
 }
 
 PokemonUiRect pokemonPokedexCardBounds(const int screenWidth, const int screenHeight, const int marginTop,

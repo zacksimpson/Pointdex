@@ -51,7 +51,27 @@ class PokemonArtPackTest(unittest.TestCase):
         self.assertEqual(expected[Path("pokedex/landscape/001.bmp")], (288, 432))
         self.assertEqual(expected[Path("pokedex/portrait/151.bmp")], (472, 708))
         self.assertEqual(expected[Path("pokedex/landscape/151.bmp")], (288, 432))
-        self.assertEqual(len(expected), 614)
+        # 614 species/item/pokedex art (original) + 151 back sprites + 77 bag
+        # item icons (ids 7-83) + 8 badge icons + 13 trainer portraits + 12
+        # trainer class portraits + 56 move-effect frames.
+        self.assertEqual(len(expected), 614 + 151 + 77 + 8 + 13 + 12 + 56)
+
+    def test_release_requires_back_sprites_bag_item_icons_badges_and_trainers(self) -> None:
+        expected = PACKAGE.expected_art()
+        self.assertEqual(expected[Path("heroes/back/001.bmp")], (120, 90))
+        self.assertEqual(expected[Path("heroes/back/151.bmp")], (120, 90))
+        self.assertEqual(expected[Path("items/007.bmp")], (32, 32))
+        self.assertEqual(expected[Path("items/083.bmp")], (32, 32))
+        self.assertEqual(expected[Path("badges/01.bmp")], (32, 32))
+        self.assertEqual(expected[Path("badges/08.bmp")], (32, 32))
+        self.assertEqual(expected[Path("trainers/01.bmp")], (32, 32))
+        self.assertEqual(expected[Path("trainers/13.bmp")], (32, 32))
+        self.assertEqual(expected[Path("trainers/classes/01.bmp")], (112, 112))
+        self.assertEqual(expected[Path("trainers/classes/12.bmp")], (112, 112))
+        self.assertEqual(expected[Path("effects/hit/03.bmp")], (144, 108))
+        self.assertEqual(expected[Path("effects/flame/05.bmp")], (144, 108))
+        self.assertNotIn(Path("effects/hit/04.bmp"), expected)
+        self.assertNotIn(Path("items/006.bmp"), expected)  # Link Cable stays icon-less
 
     def test_bmp_validation_rejects_header_without_pixel_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -104,9 +124,9 @@ class PokemonArtPackTest(unittest.TestCase):
                 source, firmware, notice, "0.1.0-RC", root / "dist"
             )
 
-            self.assertEqual(full_zip.name, "xteink-pokemon-x3-full-v0.1.0-RC.zip")
+            self.assertEqual(full_zip.name, "xteink-pokemon-x3-x4-full-v0.1.0-RC.zip")
             self.assertEqual(
-                firmware_asset.name, "xteink-pokemon-x3-firmware-v0.1.0-RC.bin"
+                firmware_asset.name, "xteink-pokemon-x3-x4-firmware-v0.1.0-RC.bin"
             )
             self.assertEqual(sums.name, "SHA256SUMS.txt")
             self.assertEqual(firmware_asset.read_bytes(), b"tested firmware")
@@ -134,6 +154,36 @@ class PokemonArtPackTest(unittest.TestCase):
                 set(sums.read_text(encoding="ascii").splitlines()), expected_lines
             )
             PACKAGE.verify_archive(full_zip, firmware_asset, notice)
+
+    def test_public_release_merges_sha256sums_for_a_second_device(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self.make_complete_source(root)
+            firmware = root / "firmware.bin"
+            firmware.write_bytes(b"tested firmware")
+            notice = root / "RIGHTS_AND_ATTRIBUTION.md"
+            notice.write_bytes(b"rights and credits\n")
+
+            x3_zip, x3_firmware, sums = PACKAGE.build_public_release(
+                source, firmware, notice, "0.3.0", root / "dist", "x3-x4"
+            )
+            x4_zip, x4_firmware, sums_again = PACKAGE.build_public_release(
+                source, firmware, notice, "0.3.0", root / "dist", "x4-pro"
+            )
+
+            self.assertEqual(sums, sums_again)
+            self.assertEqual(x3_zip.name, "xteink-pokemon-x3-x4-full-v0.3.0.zip")
+            self.assertEqual(x4_zip.name, "xteink-pokemon-x4-pro-full-v0.3.0.zip")
+            self.assertEqual(x3_firmware.name, "xteink-pokemon-x3-x4-firmware-v0.3.0.bin")
+            self.assertEqual(x4_firmware.name, "xteink-pokemon-x4-pro-firmware-v0.3.0.bin")
+
+            expected_lines = {
+                f"{hashlib.sha256(x3_zip.read_bytes()).hexdigest()}  {x3_zip.name}",
+                f"{hashlib.sha256(x3_firmware.read_bytes()).hexdigest()}  {x3_firmware.name}",
+                f"{hashlib.sha256(x4_zip.read_bytes()).hexdigest()}  {x4_zip.name}",
+                f"{hashlib.sha256(x4_firmware.read_bytes()).hexdigest()}  {x4_firmware.name}",
+            }
+            self.assertEqual(set(sums.read_text(encoding="ascii").splitlines()), expected_lines)
 
     def test_extracting_public_release_preserves_existing_saves(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

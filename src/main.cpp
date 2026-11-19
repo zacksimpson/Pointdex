@@ -31,6 +31,9 @@
 #include <cstring>
 
 #include "CrossPointSettings.h"
+#if defined(CROSSINK_ENABLE_POKEMON)
+#include "pokemon/PokemonService.h"
+#endif
 #include "CrossPointState.h"
 #include "KOReaderCredentialStore.h"
 #include "LcpPassphraseStore.h"
@@ -661,6 +664,10 @@ void setup() {
     SETTINGS.readerMenuStyle = CrossPointSettings::READER_MENU_TOOLBAR;
   }
   SETTINGS.loadFromFile();
+#if defined(CROSSINK_ENABLE_POKEMON)
+  // take the pokemon stores now, before anything scatters the c3's small heap
+  pokemon::devicePokemonService();
+#endif
   // Push the saved timezone's POSIX rule into the clock (migrating the legacy
   // UTC-offset setting on first boot after the update).
   timezones::applyToClock();

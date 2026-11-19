@@ -10,7 +10,8 @@
 namespace pokemon {
 namespace {
 
-constexpr uint8_t ALLOWED_RECORD_FLAGS = recordFlag(RecordFlag::EvolutionPromptsDisabled);
+constexpr uint8_t ALLOWED_RECORD_FLAGS =
+    recordFlag(RecordFlag::EvolutionPromptsDisabled) | recordFlag(RecordFlag::Shiny);
 
 bool isContinuation(const uint8_t byte) { return (byte & 0xC0U) == 0x80U; }
 
@@ -105,11 +106,23 @@ bool validatePendingEvent(const PendingEvent& event) {
              event.level >= 1 && event.level <= 100 && genderMatchesSpecies(event.speciesId, event.gender) &&
              event.item == EvolutionItem::None;
     case PendingEventKind::Item:
+      // `item` doubles as a general 1..POKEMON_ITEM_ID_MAX item id here (not
+      // just an EvolutionItem 1-6): PokemonGame.cpp's createItem() can now
+      // drop any of the 83 items, not only the original 6 evolution stones.
+      // Ids 1-6 are pinned to match EvolutionItem exactly, so a save
+      // written before this change keeps decoding correctly.
       return event.recordId == 0 && event.speciesId == 0 && event.level == 0 && event.gender == Gender::Unknown &&
-             event.item >= EvolutionItem::MoonStone && event.item <= EvolutionItem::LinkCable;
+             static_cast<uint8_t>(event.item) >= 1 && static_cast<uint8_t>(event.item) <= POKEMON_ITEM_ID_MAX;
     case PendingEventKind::Evolution:
       return event.recordId != 0 && event.speciesId >= 1 && event.speciesId <= KANTO_SPECIES_COUNT &&
              event.level == 0 && event.gender == Gender::Unknown && event.item == EvolutionItem::None;
+    case PendingEventKind::MoveLearn:
+      return event.recordId != 0 && event.speciesId >= 1 && event.speciesId <= POKEMON_MOVE_ID_MAX &&
+             event.level >= 1 && event.level <= 100 && event.gender == Gender::Unknown &&
+             event.item == EvolutionItem::None;
+    case PendingEventKind::Trainer:
+      return event.speciesId >= 1 && event.speciesId <= TRAINER_CLASS_COUNT && event.level >= 1 && event.level <= 100 &&
+             event.gender == Gender::Unknown && event.item == EvolutionItem::None && !event.isShiny;
   }
   return false;
 }
@@ -212,6 +225,14 @@ bool isSpeciesMarked(const PokedexBits& bits, const uint16_t speciesId) {
   return (bits[zeroBased / 8U] & static_cast<uint8_t>(1U << (zeroBased % 8U))) != 0;
 }
 
+uint16_t countMarkedSpecies(const PokedexBits& bits) {
+  uint16_t count = 0;
+  for (uint16_t speciesId = 1; speciesId <= KANTO_SPECIES_COUNT; ++speciesId) {
+    if (isSpeciesMarked(bits, speciesId)) ++count;
+  }
+  return count;
+}
+
 size_t pendingEventCount(const PokemonState& state) {
   size_t count = 0;
   while (count < state.pendingEvents.size() && state.pendingEvents[count].kind != PendingEventKind::None) ++count;
@@ -261,6 +282,24 @@ size_t removePendingEvolutionsForRecord(PokemonState& state, const uint32_t reco
   return removed;
 }
 
+size_t removePendingEventsForRecord(PokemonState& state, const uint32_t recordId) {
+  if (recordId == 0) return 0;
+  size_t writeIndex = 0;
+  size_t removed = 0;
+  for (const PendingEvent& event : state.pendingEvents) {
+    const bool refersToRecord =
+        (event.kind == PendingEventKind::Evolution || event.kind == PendingEventKind::MoveLearn) &&
+        event.recordId == recordId;
+    if (refersToRecord) {
+      ++removed;
+      continue;
+    }
+    if (event.kind != PendingEventKind::None) state.pendingEvents[writeIndex++] = event;
+  }
+  while (writeIndex < state.pendingEvents.size()) state.pendingEvents[writeIndex++] = {};
+  return removed;
+}
+
 bool validateState(const PokemonState& state) {
   bool foundEmptyPartySlot = false;
   for (size_t slot = 0; slot < state.partyRecordIds.size(); ++slot) {
@@ -279,8 +318,13 @@ bool validateState(const PokemonState& state) {
   for (size_t index = 0; index < POKEDEX_BYTES; ++index) {
     if ((state.caughtSpecies[index] & static_cast<uint8_t>(~state.seenSpecies[index])) != 0) return false;
   }
+  if (state.starterSpeciesId > KANTO_SPECIES_COUNT) return false;
   if (state.readingMinuteRemainder >= 60 || state.encounterMisses > 5 || state.itemMisses > 19 ||
       state.dashboardNotice > DashboardNotice::WhatsThis) {
+    return false;
+  }
+  if ((state.battleProgress & static_cast<uint16_t>(~POKEMON_GYM_PROGRESS_MASK)) != 0) return false;
+  if (state.ballMisses > 3 || state.medicineMisses > 3 || state.machineMisses > 3 || state.trainerMisses > 3) {
     return false;
   }
 

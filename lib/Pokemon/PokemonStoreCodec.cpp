@@ -5,10 +5,12 @@
 #include <cstring>
 #include <limits>
 
+#include "PokemonCrc32.h"
+
 namespace pokemon {
 namespace {
 
-constexpr size_t PENDING_EVENT_BYTES = 10;
+constexpr size_t PENDING_EVENT_BYTES = POKEMON_PENDING_EVENT_BYTES;
 
 void write16(uint8_t* bytes, const size_t offset, const uint16_t value) {
   bytes[offset] = static_cast<uint8_t>(value);
@@ -35,7 +37,9 @@ void encodePendingEvent(const PendingEvent& event, uint8_t* bytes) {
   write32(bytes, 0, event.recordId);
   write16(bytes, 4, event.speciesId);
   bytes[6] = event.level;
-  bytes[7] = static_cast<uint8_t>(event.gender);
+  // Gender only ever holds values 0-3 (see the Gender enum), so bit 7 of this
+  // byte is free - reused for isShiny rather than growing PENDING_EVENT_BYTES.
+  bytes[7] = static_cast<uint8_t>(event.gender) | (event.isShiny ? 0x80U : 0U);
   bytes[8] = static_cast<uint8_t>(event.item);
   bytes[9] = static_cast<uint8_t>(event.kind);
 }
@@ -45,7 +49,8 @@ PendingEvent decodePendingEvent(const uint8_t* bytes) {
   event.recordId = read32(bytes, 0);
   event.speciesId = read16(bytes, 4);
   event.level = bytes[6];
-  event.gender = static_cast<Gender>(bytes[7]);
+  event.gender = static_cast<Gender>(bytes[7] & 0x7FU);
+  event.isShiny = (bytes[7] & 0x80U) != 0;
   event.item = static_cast<EvolutionItem>(bytes[8]);
   event.kind = static_cast<PendingEventKind>(bytes[9]);
   return event;
@@ -55,6 +60,15 @@ PendingEvent decodePendingEvent(const uint8_t* bytes) {
 
 size_t snapshotStateBytes(const uint16_t version) {
   if (version == POKEMON_SNAPSHOT_VERSION_V1) return POKEMON_STATE_V1_BYTES;
+  if (version == POKEMON_SNAPSHOT_VERSION_V2) return POKEMON_STATE_V2_BYTES;
+  if (version == POKEMON_SNAPSHOT_VERSION_V3) return POKEMON_STATE_V3_BYTES;
+  if (version == POKEMON_SNAPSHOT_VERSION_V4) return POKEMON_STATE_V4_BYTES;
+  if (version == POKEMON_SNAPSHOT_VERSION_V5) return POKEMON_STATE_V5_BYTES;
+  if (version == POKEMON_SNAPSHOT_VERSION_V6) return POKEMON_STATE_V6_BYTES;
+  if (version == POKEMON_SNAPSHOT_VERSION_V7) return POKEMON_STATE_V7_BYTES;
+  if (version == POKEMON_SNAPSHOT_VERSION_V8) return POKEMON_STATE_V8_BYTES;
+  if (version == POKEMON_SNAPSHOT_VERSION_V9) return POKEMON_STATE_V9_BYTES;
+  if (version == POKEMON_SNAPSHOT_VERSION_V10) return POKEMON_STATE_V10_BYTES;
   if (version == POKEMON_SNAPSHOT_VERSION) return POKEMON_STATE_BYTES;
   return 0;
 }
@@ -107,14 +121,8 @@ HeaderDecodeResult decodeSnapshotHeader(const HeaderBytes& bytes, SnapshotHeader
   return HeaderDecodeResult::Ready;
 }
 
-uint32_t updateSnapshotCrc32(uint32_t crc, const uint8_t* data, const size_t size) {
-  for (size_t index = 0; index < size; ++index) {
-    crc ^= data[index];
-    for (uint8_t bit = 0; bit < 8; ++bit) {
-      crc = (crc >> 1U) ^ (0xEDB88320U & static_cast<uint32_t>(0U - (crc & 1U)));
-    }
-  }
-  return crc;
+uint32_t updateSnapshotCrc32(const uint32_t crc, const uint8_t* data, const size_t size) {
+  return updatePokemonCrc32(crc, data, size);
 }
 
 bool encodeState(const PokemonState& state, StateBytes& output) {
@@ -122,8 +130,18 @@ bool encodeState(const PokemonState& state, StateBytes& output) {
 
   StateBytes candidate{};
   for (size_t slot = 0; slot < PARTY_SIZE; ++slot) write32(candidate.data(), slot * 4U, state.partyRecordIds[slot]);
-  for (size_t index = 0; index < PENDING_EVENT_CAPACITY; ++index) {
+  for (size_t index = 0; index < PENDING_EVENT_LEGACY_SLOTS; ++index) {
     encodePendingEvent(state.pendingEvents[index], candidate.data() + 24U + index * PENDING_EVENT_BYTES);
+  }
+  for (size_t index = PENDING_EVENT_LEGACY_SLOTS; index < PENDING_EVENT_V8_CAPACITY; ++index) {
+    encodePendingEvent(state.pendingEvents[index],
+                       candidate.data() + POKEMON_STATE_V7_BYTES +
+                           (index - PENDING_EVENT_LEGACY_SLOTS) * PENDING_EVENT_BYTES);
+  }
+  for (size_t index = PENDING_EVENT_V8_CAPACITY; index < PENDING_EVENT_CAPACITY; ++index) {
+    encodePendingEvent(state.pendingEvents[index],
+                       candidate.data() + POKEMON_STATE_V8_BYTES +
+                           (index - PENDING_EVENT_V8_CAPACITY) * PENDING_EVENT_BYTES);
   }
   for (size_t index = 0; index < EVOLUTION_ITEM_COUNT; ++index) {
     write16(candidate.data(), 54U + index * 2U, state.itemCounts[index]);
@@ -136,6 +154,18 @@ bool encodeState(const PokemonState& state, StateBytes& output) {
   candidate[113] = state.encounterMisses;
   candidate[114] = state.itemMisses;
   candidate[115] = static_cast<uint8_t>(state.dashboardNotice);
+  std::memcpy(candidate.data() + POKEMON_STATE_V2_BYTES, state.bagCounts.data(), state.bagCounts.size());
+  write16(candidate.data(), POKEMON_STATE_V2_BYTES + POKEMON_BAG_SLOT_COUNT, state.battleProgress);
+  candidate[POKEMON_STATE_V3_BYTES] = state.ballMisses;
+  candidate[POKEMON_STATE_V3_BYTES + 1] = state.medicineMisses;
+  candidate[POKEMON_STATE_V3_BYTES + 2] = state.machineMisses;
+  candidate[POKEMON_STATE_V4_BYTES] = state.ppUpCount;
+  std::memcpy(candidate.data() + POKEMON_STATE_V5_BYTES, state.battleBoostCounts.data(),
+              state.battleBoostCounts.size());
+  std::memcpy(candidate.data() + POKEMON_STATE_V6_BYTES, state.vitaminCounts.data(), state.vitaminCounts.size());
+  candidate[POKEMON_STATE_V9_BYTES] = state.starterSpeciesId;
+  candidate[POKEMON_STATE_V10_BYTES] = state.trainerMisses;
+  std::memcpy(candidate.data() + POKEMON_STATE_V10_BYTES + 1, state.receivedItems.data(), state.receivedItems.size());
   output = candidate;
   return true;
 }
@@ -158,7 +188,10 @@ bool decodeState(const uint8_t* bytes, const size_t size, const uint16_t version
     candidate.itemMisses = bytes[94];
     candidate.dashboardNotice = static_cast<DashboardNotice>(bytes[95]);
   } else {
-    for (size_t index = 0; index < PENDING_EVENT_CAPACITY; ++index) {
+    // Shared by v2, v3 and v4: the byte 0..115 layout never changed, only what
+    // (if anything) follows it. bagCounts/battleProgress stay zero-valued
+    // (from `PokemonState candidate{};` above) for a v2 file.
+    for (size_t index = 0; index < PENDING_EVENT_LEGACY_SLOTS; ++index) {
       candidate.pendingEvents[index] = decodePendingEvent(bytes + 24U + index * PENDING_EVENT_BYTES);
     }
     for (size_t index = 0; index < EVOLUTION_ITEM_COUNT; ++index) {
@@ -172,6 +205,48 @@ bool decodeState(const uint8_t* bytes, const size_t size, const uint16_t version
     candidate.encounterMisses = bytes[113];
     candidate.itemMisses = bytes[114];
     candidate.dashboardNotice = static_cast<DashboardNotice>(bytes[115]);
+    // bagCounts/battleProgress (v3), ballMisses/medicineMisses/machineMisses
+    // (v4), ppUpCount (v5), battleBoostCounts (v6), and vitaminCounts (v7) stay zero-valued (from
+    // `PokemonState candidate{};` above) for whichever of them a given file's
+    // version predates.
+    if (version >= POKEMON_SNAPSHOT_VERSION_V3) {
+      std::memcpy(candidate.bagCounts.data(), bytes + POKEMON_STATE_V2_BYTES, candidate.bagCounts.size());
+      candidate.battleProgress = read16(bytes, POKEMON_STATE_V2_BYTES + POKEMON_BAG_SLOT_COUNT);
+    }
+    if (version >= POKEMON_SNAPSHOT_VERSION_V4) {
+      candidate.ballMisses = bytes[POKEMON_STATE_V3_BYTES];
+      candidate.medicineMisses = bytes[POKEMON_STATE_V3_BYTES + 1];
+      candidate.machineMisses = bytes[POKEMON_STATE_V3_BYTES + 2];
+    }
+    if (version >= POKEMON_SNAPSHOT_VERSION_V5) {
+      candidate.ppUpCount = bytes[POKEMON_STATE_V4_BYTES];
+    }
+    if (version >= POKEMON_SNAPSHOT_VERSION_V6) {
+      std::memcpy(candidate.battleBoostCounts.data(), bytes + POKEMON_STATE_V5_BYTES,
+                  candidate.battleBoostCounts.size());
+    }
+    if (version >= POKEMON_SNAPSHOT_VERSION_V7) {
+      std::memcpy(candidate.vitaminCounts.data(), bytes + POKEMON_STATE_V6_BYTES, candidate.vitaminCounts.size());
+    }
+    if (version >= POKEMON_SNAPSHOT_VERSION_V8) {
+      for (size_t index = PENDING_EVENT_LEGACY_SLOTS; index < PENDING_EVENT_V8_CAPACITY; ++index) {
+        candidate.pendingEvents[index] = decodePendingEvent(
+            bytes + POKEMON_STATE_V7_BYTES + (index - PENDING_EVENT_LEGACY_SLOTS) * PENDING_EVENT_BYTES);
+      }
+    }
+    if (version >= POKEMON_SNAPSHOT_VERSION_V9) {
+      for (size_t index = PENDING_EVENT_V8_CAPACITY; index < PENDING_EVENT_CAPACITY; ++index) {
+        candidate.pendingEvents[index] = decodePendingEvent(
+            bytes + POKEMON_STATE_V8_BYTES + (index - PENDING_EVENT_V8_CAPACITY) * PENDING_EVENT_BYTES);
+      }
+    }
+    if (version >= POKEMON_SNAPSHOT_VERSION_V10) {
+      candidate.starterSpeciesId = bytes[POKEMON_STATE_V9_BYTES];
+    }
+    if (version >= POKEMON_SNAPSHOT_VERSION) {
+      candidate.trainerMisses = bytes[POKEMON_STATE_V10_BYTES];
+      std::memcpy(candidate.receivedItems.data(), bytes + POKEMON_STATE_V10_BYTES + 1, candidate.receivedItems.size());
+    }
   }
   if (!validateState(candidate)) return false;
   output = candidate;

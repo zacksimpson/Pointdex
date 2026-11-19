@@ -364,6 +364,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
 #if defined(CROSSINK_ENABLE_POKEMON)
   // Show the lead Pokemon on supported home screens. Training continues when hidden.
   uint8_t pokemonHomeScreen = 1;
+  uint8_t pokemonBattleAnimations = 1;
 #endif
   // Sunlight fading compensation
   uint8_t fadingFix = 0;

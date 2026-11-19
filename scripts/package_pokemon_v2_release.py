@@ -15,6 +15,12 @@ from pathlib import Path, PurePosixPath
 
 ITEMS = ("moon-stone", "fire-stone", "thunder-stone", "water-stone", "leaf-stone")
 VERSION_PATTERN = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]*")
+# Battle move-effect animations: slug -> frame count (generate_pokemon_effect_art.py's
+# EFFECTS, and moveEffectFrameCount() in src/components/pokemon/PokemonMoveEffect.cpp).
+EFFECT_FRAMES = {
+    "hit": 3, "flame": 5, "water": 5, "ice": 4, "bolt": 5, "leaf": 3, "poison": 4,
+    "rock": 5, "wind": 5, "psychic": 3, "ghost": 5, "dragon": 5, "sparkle": 4,
+}
 
 
 def expected_art() -> dict[Path, tuple[int, int]]:
@@ -22,11 +28,32 @@ def expected_art() -> dict[Path, tuple[int, int]]:
     for species_id in range(1, 152):
         files[Path("sprites") / f"{species_id:03}.bmp"] = (40, 30)
         files[Path("heroes") / f"{species_id:03}.bmp"] = (120, 90)
+        files[Path("heroes/back") / f"{species_id:03}.bmp"] = (120, 90)
         files[Path("pokedex/portrait") / f"{species_id:03}.bmp"] = (472, 708)
         files[Path("pokedex/landscape") / f"{species_id:03}.bmp"] = (288, 432)
     for item in ITEMS:
         files[Path("items") / f"{item}.bmp"] = (32, 32)
         files[Path("heroes/items") / f"{item}.bmp"] = (64, 64)
+    # Bag items (ids 7-83: Ball/Medicine/StatusCure/Candy/PPRestore/Machine) -
+    # see BAG_ITEM_ID_START in generate_pokemon_icon_art.py. Evolution items
+    # (ids 1-6, above) keep their own slug-named files.
+    for item_id in range(7, 84):
+        files[Path("items") / f"{item_id:03}.bmp"] = (32, 32)
+    # The 8 Kanto gym badges, in order.
+    for gym_index in range(1, 9):
+        files[Path("badges") / f"{gym_index:02}.bmp"] = (32, 32)
+    # The 8 Gym Leaders + 4 Elite Four members + the Champion, in challenge
+    # order (see scripts/data/pokemon-gyms.csv / TRAINER_SLUGS).
+    for gym_index in range(1, 14):
+        files[Path("trainers") / f"{gym_index:02}.bmp"] = (32, 32)
+    # The 12 trainer classes met while reading (TRAINER_CLASS_SLUGS), shown on
+    # the "<Class> wants to battle!" screen.
+    for class_id in range(1, 13):
+        files[Path("trainers/classes") / f"{class_id:02}.bmp"] = (112, 112)
+    # The battle move-effect animations, one folder of frames per effect.
+    for slug, frames in EFFECT_FRAMES.items():
+        for frame in range(1, frames + 1):
+            files[Path("effects") / slug / f"{frame:02}.bmp"] = (144, 108)
     return files
 
 
@@ -171,11 +198,13 @@ def _write_deterministic_zip(source: Path, archive: Path) -> None:
 
 
 def build_public_release(source: Path, firmware: Path, notice: Path, version: str,
-                         output: Path) -> tuple[Path, Path, Path]:
+                         output: Path, device_name: str = "x3-x4") -> tuple[Path, Path, Path]:
     source = source.resolve()
     firmware = firmware.resolve()
     notice = notice.resolve()
     clean_version = normalize_version(version)
+    if VERSION_PATTERN.fullmatch(device_name) is None:
+        raise ValueError("invalid device name")
     if not firmware.is_file() or firmware.stat().st_size == 0:
         raise ValueError("firmware is missing or empty")
     if not notice.is_file():
@@ -183,8 +212,8 @@ def build_public_release(source: Path, firmware: Path, notice: Path, version: st
 
     assets = validate_art(source, allow_extra=True)
     output.mkdir(parents=True, exist_ok=True)
-    firmware_asset = output / f"xteink-pokemon-x3-firmware-v{clean_version}.bin"
-    full_zip = output / f"xteink-pokemon-x3-full-v{clean_version}.zip"
+    firmware_asset = output / f"xteink-pokemon-{device_name}-firmware-v{clean_version}.bin"
+    full_zip = output / f"xteink-pokemon-{device_name}-full-v{clean_version}.zip"
     release_sums = output / "SHA256SUMS.txt"
     shutil.copy2(firmware, firmware_asset)
 
@@ -208,11 +237,16 @@ def build_public_release(source: Path, firmware: Path, notice: Path, version: st
         _write_deterministic_zip(staging, full_zip)
 
     verify_archive(full_zip, firmware_asset, notice)
-    release_sums.write_text(
-        f"{sha256(full_zip)}  {full_zip.name}\n"
-        f"{sha256(firmware_asset)}  {firmware_asset.name}\n",
-        encoding="ascii",
-    )
+    new_lines = [f"{sha256(full_zip)}  {full_zip.name}", f"{sha256(firmware_asset)}  {firmware_asset.name}"]
+    new_names = {full_zip.name, firmware_asset.name}
+    existing_lines = []
+    if release_sums.is_file():
+        existing_lines = [
+            line
+            for line in release_sums.read_text(encoding="ascii").splitlines()
+            if line and line.partition("  ")[2] not in new_names
+        ]
+    release_sums.write_text("\n".join(existing_lines + new_lines) + "\n", encoding="ascii")
     return full_zip, firmware_asset, release_sums
 
 
@@ -300,9 +334,10 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--notice", type=Path, default=Path("RIGHTS_AND_ATTRIBUTION.md"))
     parser.add_argument("--version", required=True)
+    parser.add_argument("--name", default="x3-x4", help="Device label used in the artifact filenames (default: x3-x4)")
     args = parser.parse_args()
     full_zip, firmware_asset, sums = build_public_release(
-        args.source_pack, args.firmware, args.notice, args.version, args.output
+        args.source_pack, args.firmware, args.notice, args.version, args.output, args.name
     )
     print(full_zip)
     print(firmware_asset)

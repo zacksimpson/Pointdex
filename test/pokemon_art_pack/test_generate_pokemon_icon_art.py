@@ -101,6 +101,118 @@ class PokemonIconArtGeneratorTest(unittest.TestCase):
                 enlarged_small = small.resize(hero.size, Image.Resampling.NEAREST)
                 self.assertNotEqual(hero.tobytes(), enlarged_small.tobytes())
 
+    def test_builds_back_sprites_at_hero_resolution_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            back_source = root / "back"
+            write_rgba_icon(back_source / "1.png", (96, 96))
+
+            GENERATOR.build_back_sprites(back_source, root / "output", species_count=1)
+
+            with Image.open(root / "output/heroes/back/001.bmp") as image:
+                self.assertEqual(image.mode, "1")
+                self.assertEqual(image.size, (120, 90))
+            self.assertFalse((root / "output/sprites/back").exists())
+
+    def test_bag_item_slug_maps_tm_by_move_type_and_hm_by_number(self) -> None:
+        items_module = GENERATOR._load_module("generate_pokemon_items")
+        moves_module = GENERATOR._load_module("generate_pokemon_moves")
+        repo_root = Path(GENERATOR.SCRIPT_DIR).parent
+        all_items = {item.item_id: item for item in items_module.load_items(repo_root / "scripts/data/pokemon-items.csv")}
+        moves_by_id = {
+            move.move_id: move for move in moves_module.load_moves(repo_root / "scripts/data/pokemon-moves.csv")
+        }
+
+        poke_ball = all_items[7]
+        self.assertEqual(GENERATOR.bag_item_slug(poke_ball, moves_by_id), "poke-ball")
+
+        rare_candy = all_items[24]
+        self.assertEqual(GENERATOR.bag_item_slug(rare_candy, moves_by_id), "rare-candy")
+
+        tm01 = all_items[29]  # teaches Mega Punch, a Normal-type move
+        self.assertEqual(GENERATOR.bag_item_slug(tm01, moves_by_id), "tm-normal")
+
+        hm01 = all_items[79]
+        self.assertEqual(GENERATOR.bag_item_slug(hm01, moves_by_id), "hm01")
+
+    def test_builds_bag_item_icons_for_the_requested_ids_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            item_source = root / "items"
+            write_rgba_icon(item_source / "poke-ball.png", (32, 32))
+            write_rgba_icon(item_source / "tm-normal.png", (32, 32))
+            write_rgba_icon(item_source / "hm01.png", (32, 32))
+
+            GENERATOR.build_bag_item_icons(item_source, root / "output", item_ids={7, 29, 79})
+
+            for item_id in (7, 29, 79):
+                with Image.open(root / f"output/items/{item_id:03}.bmp") as image:
+                    self.assertEqual(image.mode, "1")
+                    self.assertEqual(image.size, (32, 32))
+            self.assertFalse((root / "output/items/006.bmp").exists())  # Link Cable (id 6) is out of range
+
+    def test_builds_eight_badge_icons(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            badge_source = root / "badges"
+            for gym_index in range(1, 9):
+                write_rgba_icon(badge_source / f"{gym_index}.png", (32, 32))
+
+            GENERATOR.build_badges(badge_source, root / "output")
+
+            for gym_index in range(1, 9):
+                with Image.open(root / f"output/badges/{gym_index:02}.bmp") as image:
+                    self.assertEqual(image.mode, "1")
+                    self.assertEqual(image.size, (32, 32))
+
+    def test_builds_thirteen_trainer_portraits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trainer_source = root / "trainers"
+            for slug in GENERATOR.TRAINER_SLUGS:
+                write_rgba_icon(trainer_source / f"{slug}.png", (32, 32))
+
+            GENERATOR.build_trainers(trainer_source, root / "output")
+
+            for gym_index in range(1, 14):
+                with Image.open(root / f"output/trainers/{gym_index:02}.bmp") as image:
+                    self.assertEqual(image.mode, "1")
+                    self.assertEqual(image.size, (32, 32))
+
+    def test_rejects_a_missing_trainer_portrait(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trainer_source = root / "trainers"
+            for slug in GENERATOR.TRAINER_SLUGS[:-1]:
+                write_rgba_icon(trainer_source / f"{slug}.png", (32, 32))
+
+            with self.assertRaises(ValueError):
+                GENERATOR.build_trainers(trainer_source, root / "output")
+
+    def test_builds_twelve_trainer_class_portraits_at_twice_the_source_size(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "classes"
+            for slug in GENERATOR.TRAINER_CLASS_SLUGS:
+                write_rgba_icon(source / f"{slug}.png", (56, 56))
+
+            GENERATOR.build_trainer_classes(source, root / "output")
+
+            for class_id in range(1, 13):
+                with Image.open(root / f"output/trainers/classes/{class_id:02}.bmp") as image:
+                    self.assertEqual(image.mode, "1")
+                    self.assertEqual(image.size, (112, 112))
+
+    def test_rejects_a_missing_trainer_class_portrait(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "classes"
+            for slug in GENERATOR.TRAINER_CLASS_SLUGS[:-1]:
+                write_rgba_icon(source / f"{slug}.png", (56, 56))
+
+            with self.assertRaises(ValueError):
+                GENERATOR.build_trainer_classes(source, root / "output")
+
     def test_rejects_a_missing_species_icon(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

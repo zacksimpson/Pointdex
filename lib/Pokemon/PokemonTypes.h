@@ -10,11 +10,52 @@ namespace pokemon {
 constexpr size_t POKEMON_RECORD_BYTES = 48;
 constexpr size_t POKEMON_NICKNAME_BYTES = 33;
 constexpr uint16_t KANTO_SPECIES_COUNT = 151;
+// Trainer classes met while reading - see TrainerClass in PokemonTrainers.h.
+constexpr uint8_t TRAINER_CLASS_COUNT = 12;
 constexpr uint32_t MAXIMUM_TOTAL_XP = 8340;
 constexpr size_t POKEDEX_BYTES = 19;
 constexpr size_t PARTY_SIZE = 6;
 constexpr size_t EVOLUTION_ITEM_COUNT = 6;
-constexpr size_t PENDING_EVENT_CAPACITY = 3;
+// The pending-event queue used to hold 3; save v8 grew it to 10. The first
+// PENDING_EVENT_LEGACY_SLOTS live at their original byte offsets and the rest
+// are appended at the end of the state (see PokemonStoreCodec.h), so older
+// saves keep decoding unchanged.
+constexpr size_t PENDING_EVENT_LEGACY_SLOTS = 3;
+// Save v8 grew the queue from 3 to 10; save v9 grows it again, to 16 - using
+// up the rest of the room inspectSnapshot()'s now-16-bit pending-record
+// bitmask (see PokemonStore.cpp) already has. PENDING_EVENT_V8_CAPACITY marks
+// where v8's own fixed-size region ends, so the codec (PokemonStoreCodec.h/
+// .cpp) knows where to append v9's further slots without shifting v8's.
+constexpr size_t PENDING_EVENT_V8_CAPACITY = 10;
+constexpr size_t PENDING_EVENT_CAPACITY = 16;
+// PokemonStore.cpp's inspectSnapshot() packs one bit per slot into a
+// uint16_t bitmask when cross-checking pending Evolution events against the
+// record list - grow that mask's type too if this ever exceeds 16.
+static_assert(PENDING_EVENT_CAPACITY <= 16, "inspectSnapshot()'s pending-record bitmask is 16 bits wide");
+
+// Pinned copies of constants that really live in PokemonBattleTypes.h
+// (MOVE_COUNT, ITEM_COUNT, GYM_COUNT). PokemonTypes.h/.cpp is the core layer
+// that PokemonBattleTypes.h itself depends on (via PokemonSpecies.h), so it
+// cannot include the battle layer without inverting that dependency -
+// PokemonMoveData.cpp/PokemonItemData.cpp/PokemonGymData.cpp each carry a
+// static_assert cross-checking these stay in sync with their source of truth.
+constexpr uint16_t POKEMON_MOVE_ID_MAX = 165;
+// ITEM_COUNT(90) - the 6 evolution stones (tracked in itemCounts) - PP Up
+// (id 84, tracked in its own PokemonState::ppUpCount field, not bagCounts -
+// see PP_UP_ITEM_ID in PokemonBattleTypes.h for why) - the 6 battle-boost
+// items (ids 85-90, tracked in PokemonState::battleBoostCounts, same reason) -
+// the 5 EV vitamins (ids 91-95, tracked in PokemonState::vitaminCounts, same reason).
+constexpr size_t POKEMON_BAG_SLOT_COUNT = 77;
+// = EVOLUTION_ITEM_COUNT + POKEMON_BAG_SLOT_COUNT + 1 (PP Up) + 6 (battle-boost items) + 5 (vitamins).
+constexpr uint8_t POKEMON_ITEM_ID_MAX = 95;
+// Pinned copy of PokemonBattleTypes.h's BATTLE_BOOST_ITEM_COUNT (same
+// cross-layer-dependency reason as POKEMON_BAG_SLOT_COUNT/POKEMON_ITEM_ID_MAX
+// above) - PokemonItemData.cpp's static_assert keeps these in sync.
+constexpr size_t POKEMON_BATTLE_BOOST_ITEM_COUNT = 6;
+// Pinned copy of PokemonBattleTypes.h's VITAMIN_ITEM_COUNT, same reason.
+constexpr size_t POKEMON_VITAMIN_ITEM_COUNT = 5;
+constexpr uint16_t POKEMON_GYM_PROGRESS_BITS = 13;  // 8 gyms + 4 Elite Four + the Champion
+constexpr uint16_t POKEMON_GYM_PROGRESS_MASK = static_cast<uint16_t>((1U << POKEMON_GYM_PROGRESS_BITS) - 1U);
 
 enum class Gender : uint8_t {
   Unknown = 0,
@@ -31,6 +72,7 @@ enum class Origin : uint8_t {
 
 enum class RecordFlag : uint8_t {
   EvolutionPromptsDisabled = 1U << 0U,
+  Shiny = 1U << 1U,
 };
 
 enum class EvolutionItem : uint8_t {
@@ -48,6 +90,15 @@ enum class PendingEventKind : uint8_t {
   Encounter = 1,
   Item = 2,
   Evolution = 3,
+  // Reuses PendingEvent's existing 10-byte layout: `speciesId` holds the
+  // moveId being learned (1..POKEMON_MOVE_ID_MAX) and `level` holds the
+  // level it was learned at. No size change to PendingEvent/PokemonState.
+  MoveLearn = 4,
+  // A trainer met while reading (see PokemonTrainers.h), same 10-byte
+  // layout: `speciesId` holds its TrainerClass (1..TRAINER_CLASS_COUNT),
+  // `level` its level and `recordId` the seed its team is rebuilt from.
+  // Added in save version 11.
+  Trainer = 5,
 };
 
 enum class DashboardNotice : uint8_t {
@@ -72,6 +123,10 @@ struct PokemonRecord {
   bool operator==(const PokemonRecord&) const = default;
 };
 
+constexpr bool isRecordShiny(const PokemonRecord& record) {
+  return (record.flags & recordFlag(RecordFlag::Shiny)) != 0;
+}
+
 struct LevelXpProgress {
   uint8_t level = 1;
   uint32_t earned = 0;
@@ -87,6 +142,13 @@ struct PendingEvent {
   Gender gender = Gender::Unknown;
   EvolutionItem item = EvolutionItem::None;
   PendingEventKind kind = PendingEventKind::None;
+  // Only meaningful for kind == Encounter - rolled once, right after the
+  // encounter is created (see PokemonService::creditMinutes()), so the shiny
+  // star is already visible on the "Wild X appeared!" screen, before the
+  // player even chooses Fight. Packed into a spare bit of the wire-format
+  // gender byte rather than growing PENDING_EVENT_BYTES - see
+  // encodePendingEvent()/decodePendingEvent().
+  bool isShiny = false;
 
   bool operator==(const PendingEvent&) const = default;
 };
@@ -105,6 +167,51 @@ struct PokemonState {
   uint8_t encounterMisses = 0;
   uint8_t itemMisses = 0;
   DashboardNotice dashboardNotice = DashboardNotice::None;
+  // v3: appended after the v2 layout (PokemonStoreCodec.cpp's byte 116) so
+  // a v2 save zero-extends cleanly instead of requiring a field shuffle.
+  std::array<uint8_t, POKEMON_BAG_SLOT_COUNT> bagCounts{};
+  uint16_t battleProgress = 0;  // bit N (0-7) = gym N+1 defeated, bit 8+M (0-3) = Elite Four member M+1 defeated
+  // v4: appended after the v3 layout (PokemonStoreCodec.cpp's byte 195). Pity
+  // counters for the three item-drop tracks that gained their own
+  // guaranteed-after-3-misses roll in Stage 23 (see PokemonGame.cpp) - mirrors
+  // encounterMisses/itemMisses above, just one counter per new track.
+  uint8_t ballMisses = 0;
+  uint8_t medicineMisses = 0;
+  uint8_t machineMisses = 0;
+  // v5: appended after the v4 layout (PokemonStoreCodec.cpp's byte 198). How
+  // many PP Up items the player currently holds - a new item, but one whose
+  // effect (raising a move slot's max PP) doesn't fit any existing bagCounts-
+  // tracked category cleanly enough to reuse that array, so it gets its own
+  // field instead of growing bagCounts (which would shift every byte after
+  // it and break every already-shipped v3/v4 save).
+  uint8_t ppUpCount = 0;
+  // v6: appended after the v5 layout (PokemonStoreCodec.cpp's byte 199). One
+  // count per battle-boost item (X Attack/X Defense/X Speed/X Special/Guard
+  // Spec./Dire Hit, indices 0-5 matching BATTLE_BOOST_ITEM_ID_FIRST.. in
+  // ItemCategory::BattleBoost order) - same reason as ppUpCount above: none
+  // of these fit bagCounts without growing it and breaking every earlier save.
+  std::array<uint8_t, POKEMON_BATTLE_BOOST_ITEM_COUNT> battleBoostCounts{};
+  // v7: appended after the v6 layout (PokemonStoreCodec.cpp's byte 205). One
+  // count per EV vitamin (HP Up/Protein/Iron/Calcium/Carbos, indices 0-4
+  // matching VITAMIN_ITEM_ID_FIRST.. in ItemCategory::Vitamin order) - same
+  // reason as ppUpCount/battleBoostCounts above.
+  std::array<uint8_t, POKEMON_VITAMIN_ITEM_COUNT> vitaminCounts{};
+  // v10: appended after the v9 layout (PokemonStoreCodec.cpp's byte 340). The
+  // species the player picked as their starter, recorded once at creation so
+  // the Champion's final slot (championFinalSlotFor()) never depends on the
+  // starter record still existing - it can be deposited, evolved or released
+  // like any other Pokemon. 0 = not recorded (a pre-v10 save): the record is
+  // then still around, and releaseRecord() records it just before it goes.
+  uint8_t starterSpeciesId = 0;
+  // v11: appended after the v10 layout (PokemonStoreCodec.cpp's byte 341).
+  // Pity counter of the road-trainer roll (see TRAINER_CHECK_MINUTES in
+  // PokemonTrainers.h), the same shape as encounterMisses.
+  uint8_t trainerMisses = 0;
+  // v11: how many of each item (index = item id - 1) went into the bag since
+  // the player last looked at the "items received" summary. Items no longer
+  // queue a PendingEvent: they land in the bag at once and are only listed
+  // here (saturating at 255).
+  std::array<uint8_t, POKEMON_ITEM_ID_MAX> receivedItems{};
 
   bool operator==(const PokemonState&) const = default;
 };
@@ -119,12 +226,17 @@ uint8_t levelForXp(uint32_t totalXp);
 LevelXpProgress levelXpProgress(uint32_t totalXp);
 bool markSpecies(PokedexBits& bits, uint16_t speciesId);
 bool isSpeciesMarked(const PokedexBits& bits, uint16_t speciesId);
+// Number of Kanto species (1..KANTO_SPECIES_COUNT) marked in `bits`; bits beyond that range are ignored.
+uint16_t countMarkedSpecies(const PokedexBits& bits);
 size_t pendingEventCount(const PokemonState& state);
 const PendingEvent* pendingEventFront(const PokemonState& state);
 PendingEvent* pendingEventFront(PokemonState& state);
 bool enqueuePendingEvent(PokemonState& state, const PendingEvent& event);
 bool dequeuePendingEvent(PokemonState& state);
 size_t removePendingEvolutionsForRecord(PokemonState& state, uint32_t recordId);
+// Removes every queued prompt that refers to `recordId` (Evolution AND MoveLearn) - used when the record
+// itself goes away, so no prompt is left pointing at a Pokemon that no longer exists.
+size_t removePendingEventsForRecord(PokemonState& state, uint32_t recordId);
 bool validateState(const PokemonState& state);
 
 }  // namespace pokemon
