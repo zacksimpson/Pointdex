@@ -5963,7 +5963,11 @@ void PokemonActivity::renderHeaderAndHints() {
     const int titleY = header.y + std::max(0, header.height - renderer.getLineHeight(UI_12_FONT_ID) - titleRuleGap);
     renderer.drawText(UI_12_FONT_ID, header.x + metrics.headerSidePadding, titleY, title, true, EpdFontFamily::BOLD);
   }
-  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  // on the button grids the two front buttons step sideways, on lists they step up and down
+  const bool sideways = screen_ == Screen::Menu || screen_ == Screen::Bag || screen_ == Screen::Battle ||
+                        screen_ == Screen::BattleMoves || (isChoiceButtonScreen() && choiceColumns() > 1);
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), sideways ? tr(STR_DIR_LEFT) : tr(STR_DIR_UP),
+                                            sideways ? tr(STR_DIR_RIGHT) : tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 }
 
