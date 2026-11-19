@@ -56,6 +56,7 @@ void ReaderActivity::disableFastInitialRefresh() { pagesUntilFullRefresh = 0; }
 void ReaderActivity::notePageTurn(const bool forward, const bool succeeded, const bool creditsReading) {
   RenderLock lock(*this);
   readerSession.noteTurn(forward, succeeded);
+  readerPace.noteTurn(forward && creditsReading, succeeded);
 #if defined(CROSSINK_ENABLE_POKEMON)
   // The verifier waits for the render to finish, so a turn only counts once the page is really on screen.
   if (succeeded && creditsReading) {
@@ -296,11 +297,13 @@ void ReaderActivity::render(RenderLock&&) {
     onEndOfBookRendered();
     markPageRendered();
     readerSession.onRenderComplete(millis(), trustedtime::trustedNow(), getProgressBasisPoints());
+    readerPace.onRenderComplete(millis());
     return;
   }
 
   renderBook();
   readerSession.onRenderComplete(millis(), trustedtime::trustedNow(), getProgressBasisPoints());
+  readerPace.onRenderComplete(millis());
 #if defined(CROSSINK_ENABLE_POKEMON)
   pokemonTurnVerifier.renderSucceeded(static_cast<uint32_t>(millis()));
 #endif

@@ -2430,6 +2430,41 @@ void EpubReaderActivity::drawClippingHighlights(const Page& page, const int font
           static_cast<unsigned>(chapterClippings), static_cast<unsigned>(highlightedWords), millis() - started);
 }
 
+bool EpubReaderActivity::formatTimeLeftLabel(char* buf, const size_t len) const {
+  if (SETTINGS.statusBarTimeLeft == CrossPointSettings::TIME_LEFT_HIDE || !epub || !section) return false;
+  const int totalPages = section->estimatedTotalPages();
+  if (totalPages <= 0) return false;
+
+  float remainingPages = 0.0f;
+  if (SETTINGS.statusBarTimeLeft == CrossPointSettings::TIME_LEFT_CHAPTER) {
+    remainingPages = static_cast<float>(totalPages - (section->currentPage + 1));
+  } else {
+    const size_t bookSize = epub->getBookSize();
+    const size_t prevSize = currentSpineIndex >= 1 ? epub->getCumulativeSpineItemSize(currentSpineIndex - 1) : 0;
+    const size_t chapterSize = epub->getCumulativeSpineItemSize(currentSpineIndex) - prevSize;
+    if (bookSize == 0 || chapterSize == 0) return false;
+    const float bytesPerPage = static_cast<float>(chapterSize) / totalPages;
+    const float doneBytes = static_cast<float>(prevSize) + bytesPerPage * (section->currentPage + 1);
+    remainingPages = (static_cast<float>(bookSize) - doneBytes) / bytesPerPage;
+  }
+  if (remainingPages <= 0.0f) return false;
+
+  float secondsPerPage = 0.0f;
+  if (!readerPace.secondsPerPage(secondsPerPage)) {
+    snprintf(buf, len, "%s", tr(STR_TIME_LEFT_CALCULATING));
+    return true;
+  }
+  const int minutes = static_cast<int>(remainingPages * secondsPerPage / 60.0f + 0.5f);
+  if (minutes < 1) {
+    snprintf(buf, len, "<1m");
+  } else if (minutes < 60) {
+    snprintf(buf, len, "%dm", minutes);
+  } else {
+    snprintf(buf, len, "%dh %dm", minutes / 60, minutes % 60);
+  }
+  return true;
+}
+
 void EpubReaderActivity::renderStatusBar() const {
   const int currentPage = section ? section->currentPage + 1 : 1;
   const float pageCount = section ? section->estimatedTotalPages() : 1;
@@ -2469,8 +2504,10 @@ void EpubReaderActivity::renderStatusBar() const {
     title = epub ? epub->getTitle() : "";
   }
 
+  char timeLeft[16];
+  const bool hasTimeLeft = formatTimeLeftLabel(timeLeft, sizeof(timeLeft));
   GUI.drawStatusBar(renderer, bookProgress, currentPage, pageCount, title, 0, textYOffset, true, currentPageBookmarked,
-                    section ? section->isBuilding() : false);
+                    section ? section->isBuilding() : false, hasTimeLeft ? timeLeft : nullptr);
 }
 
 // ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "EndOfBookOptions.h"
+#include "ReaderPace.h"
 #include "ReaderSession.h"
 #include "activities/Activity.h"
 
@@ -24,6 +25,7 @@ class ReaderActivity : public Activity {
   std::unique_ptr<EndOfBookOptions> endOfBookOptions;
   std::atomic<bool> endOfBookOptionsReady{false};
   ReaderSession readerSession;
+  ReaderPace readerPace;
 #if defined(CROSSINK_ENABLE_POKEMON)
   pokemon::PokemonTurnVerifier pokemonTurnVerifier;
   // Credits verified manual turns and checkpoints saves. Call once per loop.

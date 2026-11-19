@@ -319,6 +319,7 @@ CrossPointSettings::StatusBarSpec CrossPointSettings::statusBarSpec() const {
   spec.titleMode = statusBarTitle;
   spec.showBattery = statusBarBattery != 0;
   spec.showBatteryPercent = hideBatteryPercentage == HIDE_NEVER;
+  spec.timeLeftMode = statusBarTimeLeft;
   spec.clockMode = statusBarClock;
   spec.clock12h = clockFormat == 1;
   spec.progressBarMode = statusBarProgressBar;

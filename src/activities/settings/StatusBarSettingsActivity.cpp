@@ -25,6 +25,7 @@ enum MenuItem {
   ITEM_PROGRESS_BAR_THICKNESS,
   ITEM_TITLE,
   ITEM_BATTERY,
+  ITEM_TIME_LEFT,
   ITEM_XTC_STATUS_BAR,
   ITEM_CLOCK,  // RTC boards only
   ITEM_COUNT
@@ -42,6 +43,7 @@ const StrId menuNames[FULL_MENU_ITEMS] = {
     StrId::STR_PROGRESS_BAR_THICKNESS,
     StrId::STR_TITLE,
     StrId::STR_BATTERY,
+    StrId::STR_TIME_LEFT,
     StrId::STR_XTC_STATUS_BAR,
     StrId::STR_CLOCK,
 };
@@ -55,6 +57,9 @@ const StrId progressBarThicknessNames[PROGRESS_BAR_THICKNESS_ITEMS] = {
 
 constexpr int TITLE_ITEMS = 3;
 const StrId titleNames[TITLE_ITEMS] = {StrId::STR_BOOK, StrId::STR_CHAPTER, StrId::STR_HIDE};
+
+constexpr int TIME_LEFT_ITEMS = CrossPointSettings::STATUS_BAR_TIME_LEFT_COUNT;
+const StrId timeLeftNames[TIME_LEFT_ITEMS] = {StrId::STR_HIDE, StrId::STR_CHAPTER, StrId::STR_BOOK};
 
 constexpr int XTC_STATUS_BAR_ITEMS = 3;
 const StrId xtcStatusBarNames[XTC_STATUS_BAR_ITEMS] = {StrId::STR_HIDE, StrId::STR_BOTTOM, StrId::STR_TOP};
@@ -84,6 +89,10 @@ void StatusBarSettingsActivity::onEnter() {
 
   if (SETTINGS.statusBarTitle >= TITLE_ITEMS) {
     SETTINGS.statusBarTitle = CrossPointSettings::STATUS_BAR_TITLE::HIDE_TITLE;
+  }
+
+  if (SETTINGS.statusBarTimeLeft >= TIME_LEFT_ITEMS) {
+    SETTINGS.statusBarTimeLeft = CrossPointSettings::STATUS_BAR_TIME_LEFT::TIME_LEFT_HIDE;
   }
 
   if (SETTINGS.xtcStatusBarMode >= XTC_STATUS_BAR_ITEMS) {
@@ -147,6 +156,12 @@ void StatusBarSettingsActivity::handleSelection() {
     case ITEM_BATTERY:
       SETTINGS.statusBarBattery = (SETTINGS.statusBarBattery + 1) % 2;
       break;
+    case ITEM_TIME_LEFT:
+      optionPopup.show(StrId::STR_TIME_LEFT, timeLeftNames, TIME_LEFT_ITEMS, SETTINGS.statusBarTimeLeft, [this](int idx) {
+        SETTINGS.statusBarTimeLeft = idx;
+        SETTINGS.saveToFile();
+      });
+      return;
     case ITEM_XTC_STATUS_BAR:
       optionPopup.show(StrId::STR_XTC_STATUS_BAR, xtcStatusBarNames, XTC_STATUS_BAR_ITEMS, SETTINGS.xtcStatusBarMode,
                        [this](int idx) {
@@ -171,6 +186,8 @@ std::string StatusBarSettingsActivity::rowValueText(const int index) {
       return I18N.get(progressBarThicknessNames[SETTINGS.statusBarProgressBarThickness]);
     case ITEM_TITLE:
       return I18N.get(titleNames[SETTINGS.statusBarTitle]);
+    case ITEM_TIME_LEFT:
+      return I18N.get(timeLeftNames[SETTINGS.statusBarTimeLeft]);
     case ITEM_XTC_STATUS_BAR:
       return I18N.get(xtcStatusBarNames[SETTINGS.xtcStatusBarMode]);
     case ITEM_CLOCK:

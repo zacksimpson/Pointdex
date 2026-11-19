@@ -809,7 +809,8 @@ void BaseTheme::fillPopupProgress(const GfxRenderer& renderer, const Rect& layou
 
 void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage,
                               const int pageCount, std::string title, const int paddingBottom, const int textYOffset,
-                              const bool fillMargin, const bool isPageBookmarked, const bool pageCountEstimated) {
+                              const bool fillMargin, const bool isPageBookmarked, const bool pageCountEstimated,
+                              const char* timeLeftLabel) {
   auto metrics = UITheme::getInstance().getMetrics();
   int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
   renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
@@ -896,6 +897,13 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     }
 
     leftClusterWidth += batteryWidth;
+  }
+
+  // time left, after the battery on the left
+  if (timeLeftLabel != nullptr && timeLeftLabel[0] != '\0') {
+    const int labelGap = leftClusterWidth > 0 ? 10 : 0;
+    renderer.drawText(SMALL_FONT_ID, leftClusterX + leftClusterWidth + labelGap, textY, timeLeftLabel);
+    leftClusterWidth += labelGap + renderer.getTextWidth(SMALL_FONT_ID, timeLeftLabel);
   }
 
   // Draw Clock (any board whose RTC probe succeeded)
