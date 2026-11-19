@@ -507,8 +507,11 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
 
   if (hasContinueReading && !recentBooks[0].coverBmpPath.empty()) {
     // Try to get actual image dimensions from BMP header
-    const std::string coverBmpPath =
-        UITheme::getCoverThumbPath(recentBooks[0].coverBmpPath, BaseMetrics::values.homeCoverHeight);
+    // a shortened tile uses a thumb made at that exact height, else the full one
+    std::string coverBmpPath = UITheme::getCoverThumbPath(recentBooks[0].coverBmpPath, baseHeight);
+    if (baseHeight != BaseMetrics::values.homeCoverHeight && !Storage.exists(coverBmpPath.c_str())) {
+      coverBmpPath = UITheme::getCoverThumbPath(recentBooks[0].coverBmpPath, BaseMetrics::values.homeCoverHeight);
+    }
 
     HalFile file;
     if (Storage.openFileForRead("HOME", coverBmpPath, file)) {
@@ -556,8 +559,12 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
     // Only load from SD on first render, then use stored buffer
 
     if (hasContinueReading && !recentBooks[0].coverBmpPath.empty() && !coverRendered) {
-      const std::string coverBmpPath =
-          UITheme::getCoverThumbPath(recentBooks[0].coverBmpPath, BaseMetrics::values.homeCoverHeight);
+      std::string coverBmpPath = UITheme::getCoverThumbPath(recentBooks[0].coverBmpPath, bookHeight);
+      bool exactThumb = true;
+      if (bookHeight != BaseMetrics::values.homeCoverHeight && !Storage.exists(coverBmpPath.c_str())) {
+        coverBmpPath = UITheme::getCoverThumbPath(recentBooks[0].coverBmpPath, BaseMetrics::values.homeCoverHeight);
+        exactThumb = false;
+      }
 
       // First time: load cover from SD and render
       HalFile file;
@@ -568,7 +575,12 @@ void BaseTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, const std:
 
           // The card matches the cover aspect except when width-capped; fill
           // the card 1:1 and crop the overflow rather than rescale the dither.
-          drawCoverThumbFill(renderer, bitmap, Rect{bookX, bookY, bookWidth, bookHeight});
+          if (exactThumb) {
+            drawCoverThumbFill(renderer, bitmap, Rect{bookX, bookY, bookWidth, bookHeight});
+          } else {
+            // thumb for this height is not made yet, scale the full one for now
+            renderer.drawBitmap(bitmap, bookX, bookY, bookWidth, bookHeight);
+          }
 
           // Draw border around the card
           renderer.drawRect(bookX, bookY, bookWidth, bookHeight);

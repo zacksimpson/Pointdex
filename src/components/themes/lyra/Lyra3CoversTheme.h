@@ -21,4 +21,6 @@ class Lyra3CoversTheme : public LyraTheme {
                            const int selectorIndex, bool& coverRendered, bool& coverBufferStored, bool& bufferRestored,
                            std::function<bool()> storeCoverBuffer) const override;
   int homeCoverThumbHeight(const GfxRenderer& renderer) const override;
+  // cover height that fits a (possibly shortened) home tile, titles take one line
+  static int coverHeightForTile(const GfxRenderer& renderer, int tileHeight);
 };

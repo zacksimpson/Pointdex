@@ -24,6 +24,7 @@
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "components/UITheme.h"
+#include "components/themes/lyra/Lyra3CoversTheme.h"
 #include "fontIds.h"
 
 #if defined(CROSSINK_ENABLE_POKEMON)
@@ -550,6 +551,11 @@ void HomeActivity::render(RenderLock&&) {
       SETTINGS.pokemonHomeScreen != 0, pokemon::pokemonHomeAccessorySupported(SETTINGS.uiTheme),
       pokemonDashboard_.leader.recordId != 0);
   if (showPokemonAccessory) pokemonBandOffset = pokemon::kPokemonHomeAccessoryFollowingOffset;
+  // roundedraff has spare room between the strip and the menu, so pull the menu up into it
+  constexpr int kRoundedRaffMenuLift = 10;
+  if (showPokemonAccessory && SETTINGS.uiTheme == CrossPointSettings::ROUNDEDRAFF) {
+    pokemonBandOffset -= kRoundedRaffMenuLift;
+  }
   {
     // the extra row and accessory band push the menu down, so give the difference back by
     // shrinking the cover tile. only classic and roundedraff scale their cover to the tile,
@@ -558,15 +564,47 @@ void HomeActivity::render(RenderLock&&) {
     const int menuNeeded = rows * GUI.getMenuRowHeight(renderer) + std::max(0, rows - 1) * metrics.menuSpacing;
     const int menuStart = metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset;
     const int limit = pageHeight - metrics.buttonHintsHeight;
-    const int overflow = menuStart + pokemonBandOffset + menuNeeded - limit;
-    const bool themeScalesCover =
-        SETTINGS.uiTheme == CrossPointSettings::CLASSIC || SETTINGS.uiTheme == CrossPointSettings::ROUNDEDRAFF;
+    // the base theme menu draws its rows one verticalSpacing below the rect it is given,
+    // and classic wants one more above the button hints. lyra just wants a small gap.
+    int menuPad = 0;
+    if (SETTINGS.uiTheme == CrossPointSettings::CLASSIC) menuPad = 2 * metrics.verticalSpacing;
+    if (SETTINGS.uiTheme == CrossPointSettings::LYRA_3_COVERS) menuPad = metrics.verticalSpacing / 2;
+    if (SETTINGS.uiTheme == CrossPointSettings::ROUNDEDRAFF) menuPad = 10;
+    int overflow = menuStart + pokemonBandOffset + menuPad + menuNeeded - limit;
+    const bool themeScalesCover = SETTINGS.uiTheme == CrossPointSettings::CLASSIC ||
+                                  SETTINGS.uiTheme == CrossPointSettings::ROUNDEDRAFF ||
+                                  SETTINGS.uiTheme == CrossPointSettings::LYRA_3_COVERS;
     if (overflow > 0) {
-      if (themeScalesCover) {
-        coverTileHeight = std::max(coverTileHeight / 2, coverTileHeight - overflow);
-      } else {
+      bool keepStrip = themeScalesCover;
+      // lyra 3 covers would get tiny covers if they paid for the strip too, so drop the strip first
+      constexpr int kMinLyraCoverHeight = 150;
+      if (keepStrip && SETTINGS.uiTheme == CrossPointSettings::LYRA_3_COVERS &&
+          Lyra3CoversTheme::coverHeightForTile(renderer, coverTileHeight - overflow) < kMinLyraCoverHeight) {
+        keepStrip = false;
+        if (showPokemonAccessory) overflow -= pokemonBandOffset;
         showPokemonAccessory = false;
         pokemonBandOffset = 0;
+      }
+      if (keepStrip || (themeScalesCover && overflow > 0)) {
+        coverTileHeight = std::max(coverTileHeight / 2, coverTileHeight - overflow);
+      } else if (!themeScalesCover) {
+        showPokemonAccessory = false;
+        pokemonBandOffset = 0;
+      }
+    }
+  }
+#endif
+
+  // with no strip on screen, flag the pokemon row so a waiting event is still visible from home
+  std::string pokemonRowLabel;
+  int pokemonRowIndex = -1;
+#if defined(CROSSINK_ENABLE_POKEMON)
+  if (hasPokemonSlot && !showPokemonAccessory && pokemonDashboard_.notice != pokemon::DashboardNotice::None) {
+    for (int i = 0; i < static_cast<int>(menuItems.size()); i++) {
+      if (std::strcmp(menuItems[i], tr(STR_POKEMON)) == 0) {
+        pokemonRowIndex = i;
+        pokemonRowLabel = std::string(tr(STR_POKEMON)) + " !";
+        break;
       }
     }
   }
@@ -616,7 +654,9 @@ void HomeActivity::render(RenderLock&&) {
                          metrics.homeMenuTopOffset + metrics.buttonHintsHeight)},
       static_cast<int>(menuItems.size()),
       metrics.homeContinueReadingInMenu ? selectorIndex : selectorIndex - recentBooks.size(),
-      [&menuItems](int index) { return std::string(menuItems[index]); },
+      [&menuItems, &pokemonRowLabel, pokemonRowIndex](int index) {
+        return index == pokemonRowIndex ? pokemonRowLabel : std::string(menuItems[index]);
+      },
       [&menuIcons](int index) { return menuIcons[index]; });
 
   const auto labels = mappedInput.mapLabels(recentBooks.empty() ? "" : tr(STR_RESUME), tr(STR_SELECT), tr(STR_DIR_UP),
@@ -632,9 +672,13 @@ void HomeActivity::render(RenderLock&&) {
     recentsLoading = true;
     const int themeThumbHeight = GUI.homeCoverThumbHeight(renderer);
     int thumbHeight = themeThumbHeight > 0 ? themeThumbHeight : metrics.homeCoverHeight;
-    // roundedraff scales its cover to a shortened tile, so make the thumb at that size
+    // roundedraff and classic scale their cover to a shortened tile, so make the thumb at that size
     if (SETTINGS.uiTheme == CrossPointSettings::ROUNDEDRAFF) {
       thumbHeight = std::min(thumbHeight, std::max(1, coverTileHeight - 40));
+    } else if (SETTINGS.uiTheme == CrossPointSettings::CLASSIC) {
+      thumbHeight = std::min(thumbHeight, coverTileHeight);
+    } else if (SETTINGS.uiTheme == CrossPointSettings::LYRA_3_COVERS) {
+      thumbHeight = Lyra3CoversTheme::coverHeightForTile(renderer, coverTileHeight);
     }
     loadRecentCovers(thumbHeight);
   }
