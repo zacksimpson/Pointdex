@@ -28,11 +28,15 @@ add_library(crosspoint_test_common INTERFACE)
 target_include_directories(crosspoint_test_common INTERFACE
   ${REPO_ROOT}
   ${REPO_ROOT}/lib
+  ${REPO_ROOT}/lib/Pokemon
 )
 target_compile_options(crosspoint_test_common INTERFACE
   -Wall
   -Wextra
   -pedantic
+)
+target_compile_definitions(crosspoint_test_common INTERFACE
+  CROSSINK_ENABLE_POKEMON=1
 )
 
 enable_testing()
@@ -52,6 +56,15 @@ add_subdirectory(library_format)
 add_subdirectory(library_index_file)
 add_subdirectory(library_builder)
 add_subdirectory(minibidi_arabic)
+add_subdirectory(pokemon_types)
+add_subdirectory(pokemon_game)
+add_subdirectory(pokemon_store)
+add_subdirectory(pokemon_tracker)
+add_subdirectory(pokemon_service)
+add_subdirectory(pokemon_art_path)
+add_subdirectory(pokemon_art_pack)
+add_subdirectory(pokemon_dashboard_layout)
+add_subdirectory(pokemon_ui_layout)
 add_subdirectory(combining_marks)
 add_subdirectory(credential_integrity)
 add_subdirectory(xml_parser_utils)

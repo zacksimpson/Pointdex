@@ -353,6 +353,10 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t longPressMenuFunction = LP_MENU_DISABLED;
   // UI Theme
   uint8_t uiTheme = LYRA;
+#if defined(CROSSINK_ENABLE_POKEMON)
+  // Show the lead Pokemon on supported home screens. Training continues when hidden.
+  uint8_t pokemonHomeScreen = 1;
+#endif
   // Sunlight fading compensation
   uint8_t fadingFix = 0;
   // Power button return from footnotes (1 = enabled, 0 = disabled)

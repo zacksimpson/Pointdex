@@ -62,10 +62,14 @@ void RoundedRaffTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
   const int tileHeight = rect.height;
   const int tileY = rect.y;
   const bool hasContinueReading = !recentBooks.empty();
+  const int fullCoverH = RoundedRaffMetrics::values.homeCoverHeight;
+  // the pokemon home accessory can shorten the tile, so scale the cover to fit instead of overflowing
+  const int coverH = std::min(fullCoverH, std::max(1, tileHeight - 40));
   if (coverWidth == 0) {
-    coverWidth = RoundedRaffMetrics::values.homeCoverHeight * 0.6;
+    coverWidth = coverH * 6 / 10;
   }
-  const int imgY = tileY + (tileHeight - RoundedRaffMetrics::values.homeCoverHeight) / 2;
+  int drawW = coverWidth;
+  const int imgY = tileY + (tileHeight - coverH) / 2;
   const int tileX = rect.x + RoundedRaffMetrics::values.contentSidePadding;
 
   // Draw book card regardless, fill with message based on `hasContinueReading`
@@ -79,22 +83,29 @@ void RoundedRaffTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
       if (coverPath.empty()) {
         hasCover = false;
       } else {
-        const std::string coverBmpPath =
-            UITheme::getCoverThumbPath(coverPath, RoundedRaffMetrics::values.homeCoverHeight);
+        // prefer a thumb generated at the exact drawn height (dithered once, no resampling);
+        // until it exists, fall back to scaling the full size one
+        std::string coverBmpPath = UITheme::getCoverThumbPath(coverPath, coverH);
+        bool exactThumb = true;
+        if (coverH != fullCoverH && !Storage.exists(coverBmpPath.c_str())) {
+          coverBmpPath = UITheme::getCoverThumbPath(coverPath, fullCoverH);
+          exactThumb = false;
+        }
 
         // First time: load cover from SD and render
         HalFile file;
         if (Storage.openFileForRead("HOME", coverBmpPath, file)) {
           Bitmap bitmap(file);
-          if (bitmap.parseHeaders() == BmpReaderError::Ok) {
-            coverWidth = bitmap.getWidth();
-            // Narrow covers come out taller than the slot; fill 1:1 and crop
-            // vertically instead of rescaling the dither.
-            drawCoverThumbFill(renderer, bitmap,
-                               Rect{tileX + (tileWidth - coverWidth) / 2, imgY, coverWidth,
-                                    RoundedRaffMetrics::values.homeCoverHeight});
-            renderer.maskRoundedRectOutsideCorners(tileX + (tileWidth - coverWidth) / 2, imgY, coverWidth,
-                                                   RoundedRaffMetrics::values.homeCoverHeight, kCoverRadius,
+          if (bitmap.parseHeaders() == BmpReaderError::Ok && bitmap.getHeight() > 0) {
+            drawW = exactThumb ? bitmap.getWidth() : bitmap.getWidth() * coverH / fullCoverH;
+            coverWidth = drawW;
+            if (exactThumb) {
+              // narrow covers come out taller than the slot; fill 1:1 and crop vertically
+              drawCoverThumbFill(renderer, bitmap, Rect{tileX + (tileWidth - drawW) / 2, imgY, drawW, coverH});
+            } else {
+              renderer.drawBitmap(bitmap, tileX + (tileWidth - drawW) / 2, imgY, drawW, coverH);
+            }
+            renderer.maskRoundedRectOutsideCorners(tileX + (tileWidth - drawW) / 2, imgY, drawW, coverH, kCoverRadius,
                                                    Color::LightGray);
           } else {
             hasCover = false;
@@ -104,16 +115,16 @@ void RoundedRaffTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
       }
 
       // Draw either way
-      renderer.drawRoundedRect(tileX + (tileWidth - coverWidth) / 2, imgY, coverWidth,
-                               RoundedRaffMetrics::values.homeCoverHeight, 1, kCoverRadius, true);
+      renderer.drawRoundedRect(tileX + (tileWidth - drawW) / 2, imgY, drawW,
+                               coverH, 1, kCoverRadius, true);
 
       if (!hasCover) {
         // Render empty cover
-        renderer.fillRect(tileX + (tileWidth - coverWidth) / 2, imgY + (RoundedRaffMetrics::values.homeCoverHeight / 3),
-                          coverWidth, 2 * RoundedRaffMetrics::values.homeCoverHeight / 3, true);
-        renderer.drawIcon(CoverIcon, tileX + (tileWidth - coverWidth) / 2 + 24, imgY + 24, 32);
-        renderer.maskRoundedRectOutsideCorners(tileX + (tileWidth - coverWidth) / 2, imgY, coverWidth,
-                                               RoundedRaffMetrics::values.homeCoverHeight, kCoverRadius,
+        renderer.fillRect(tileX + (tileWidth - drawW) / 2, imgY + (coverH / 3),
+                          drawW, 2 * coverH / 3, true);
+        renderer.drawIcon(CoverIcon, tileX + (tileWidth - drawW) / 2 + 24, imgY + 24, 32);
+        renderer.maskRoundedRectOutsideCorners(tileX + (tileWidth - drawW) / 2, imgY, drawW,
+                                               coverH, kCoverRadius,
                                                Color::LightGray);
       }
 
@@ -123,12 +134,12 @@ void RoundedRaffTheme::drawRecentBookCover(GfxRenderer& renderer, Rect rect, con
 
     renderer.fillRoundedRect(tileX, tileY, tileWidth, imgY - tileY, kRowRadius, true, true, false, false,
                              Color::LightGray);
-    renderer.fillRectDither(tileX, imgY, (tileWidth - coverWidth) / 2, RoundedRaffMetrics::values.homeCoverHeight,
+    renderer.fillRectDither(tileX, imgY, (tileWidth - drawW) / 2, coverH,
                             Color::LightGray);
-    renderer.fillRectDither(tileX + (tileWidth + coverWidth) / 2, imgY, (tileWidth - coverWidth) / 2,
-                            RoundedRaffMetrics::values.homeCoverHeight, Color::LightGray);
-    renderer.fillRoundedRect(tileX, imgY + RoundedRaffMetrics::values.homeCoverHeight, tileWidth,
-                             tileHeight - (imgY - tileY + RoundedRaffMetrics::values.homeCoverHeight), kRowRadius,
+    renderer.fillRectDither(tileX + (tileWidth + drawW) / 2, imgY, (tileWidth - drawW) / 2,
+                            coverH, Color::LightGray);
+    renderer.fillRoundedRect(tileX, imgY + coverH, tileWidth,
+                             tileHeight - (imgY - tileY + coverH), kRowRadius,
                              false, false, true, true, Color::LightGray);
   } else {
     renderer.fillRoundedRect(tileX, tileY, tileWidth, tileHeight, kRowRadius, Color::LightGray);

@@ -26,8 +26,17 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 
+#if defined(CROSSINK_ENABLE_POKEMON)
+#include "PokemonDashboardLayout.h"
+#include "activities/pokemon/PokemonActivity.h"
+#include "components/pokemon/PokemonHomeAccessory.h"
+#endif
+
 int HomeActivity::getMenuItemCount() const {
   int count = 4;  // File Browser, Library, File transfer, Settings
+  if (hasPokemonSlot) {
+    count++;
+  }
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -234,6 +243,10 @@ void HomeActivity::onEnter() {
   // even when no SD plugins are installed yet so Plugin Hub can be installed
   // from inside the Plugins screen (or users can sideload plugins manually).
   hasPlugins = SETTINGS.pluginsEnabled != 0;
+#if defined(CROSSINK_ENABLE_POKEMON)
+  hasPokemonSlot = !UITheme::getInstance().hasCoverGridHome();
+  loadPokemonDashboard();
+#endif
 
   const auto& metrics = UITheme::getInstance().getMetrics();
   if (UITheme::getInstance().hasCoverGridHome()) {
@@ -250,7 +263,7 @@ void HomeActivity::onEnter() {
   }
 
   const auto base = static_cast<int>(recentBooks.size());
-  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, hasLibrarySlot());
+  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, hasLibrarySlot(), hasPokemonSlot);
 
   // Trigger first update
   requestUpdate();
@@ -311,7 +324,7 @@ void HomeActivity::loop() {
       return;
     }
     const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
-    switch (indexToMenuItem(menuIndex, hasLibrarySlot())) {
+    switch (indexToMenuItem(menuIndex, hasLibrarySlot(), hasPokemonSlot)) {
       case HomeMenuItem::FILE_BROWSER:
         onFileBrowserOpen();
         break;
@@ -321,6 +334,11 @@ void HomeActivity::loop() {
       case HomeMenuItem::OPDS_BROWSER:  // the library slot
         hasPlugins ? onPluginsOpen() : onOpdsBrowserOpen();
         break;
+#if defined(CROSSINK_ENABLE_POKEMON)
+      case HomeMenuItem::POKEMON:
+        onPokemonOpen();
+        break;
+#endif
       case HomeMenuItem::FILE_TRANSFER:
         onFileTransferOpen();
         break;
@@ -501,6 +519,64 @@ void HomeActivity::render(RenderLock&&) {
     }
     return;
   }
+  // Build menu items dynamically
+  std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_FILE_TRANSFER),
+                                        tr(STR_SETTINGS_TITLE)};
+  std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings};
+
+  if (hasLibrarySlot()) {
+    menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
+    menuIcons.insert(menuIcons.begin() + 2, Plugins);
+  }
+
+#if defined(CROSSINK_ENABLE_POKEMON)
+  if (hasPokemonSlot) {
+    const auto at = hasLibrarySlot() ? 3 : 2;
+    menuItems.insert(menuItems.begin() + at, tr(STR_POKEMON));
+    menuIcons.insert(menuIcons.begin() + at, Book);
+  }
+#endif
+
+  if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
+    // Insert Continue Reading at the top if enabled in theme
+    menuItems.insert(menuItems.begin(), tr(STR_CONTINUE_READING));
+    menuIcons.insert(menuIcons.begin(), Book);
+  }
+
+  int coverTileHeight = metrics.homeCoverTileHeight;
+  int pokemonBandOffset = 0;
+#if defined(CROSSINK_ENABLE_POKEMON)
+  bool showPokemonAccessory = pokemon::pokemonHomeAccessoryVisible(
+      SETTINGS.pokemonHomeScreen != 0, pokemon::pokemonHomeAccessorySupported(SETTINGS.uiTheme),
+      pokemonDashboard_.leader.recordId != 0);
+  if (showPokemonAccessory) pokemonBandOffset = pokemon::kPokemonHomeAccessoryFollowingOffset;
+  {
+    // the extra row and accessory band push the menu down, so give the difference back by
+    // shrinking the cover tile. only classic and roundedraff scale their cover to the tile,
+    // so on the other themes the band is dropped instead of cropping the cover.
+    const int rows = static_cast<int>(menuItems.size());
+    const int menuNeeded = rows * GUI.getMenuRowHeight(renderer) + std::max(0, rows - 1) * metrics.menuSpacing;
+    const int menuStart = metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset;
+    const int limit = pageHeight - metrics.buttonHintsHeight;
+    const int overflow = menuStart + pokemonBandOffset + menuNeeded - limit;
+    const bool themeScalesCover =
+        SETTINGS.uiTheme == CrossPointSettings::CLASSIC || SETTINGS.uiTheme == CrossPointSettings::ROUNDEDRAFF;
+    if (overflow > 0) {
+      if (themeScalesCover) {
+        coverTileHeight = std::max(coverTileHeight / 2, coverTileHeight - overflow);
+      } else {
+        showPokemonAccessory = false;
+        pokemonBandOffset = 0;
+      }
+    }
+  }
+#endif
+
+  // a cached cover from a different tile height would draw over the new layout
+  if (coverRendered && coverRectH != coverTileHeight) {
+    coverRendered = false;
+    freeCoverBuffer();
+  }
   bool bufferRestored = coverRendered && coverBufferStored && restoreCoverBuffer();
 
   // Band spans topPadding..homeTopPadding: the cover tile starts at the fixed
@@ -517,31 +593,25 @@ void HomeActivity::render(RenderLock&&) {
   coverRectX = content.x;
   coverRectY = metrics.homeTopPadding;
   coverRectW = content.width;
-  coverRectH = metrics.homeCoverTileHeight;
+  coverRectH = coverTileHeight;
 
-  GUI.drawRecentBookCover(renderer, Rect{content.x, metrics.homeTopPadding, content.width, metrics.homeCoverTileHeight},
+  GUI.drawRecentBookCover(renderer, Rect{content.x, metrics.homeTopPadding, content.width, coverTileHeight},
                           recentBooks, selectorIndex, coverRendered, coverBufferStored, bufferRestored,
                           std::bind(&HomeActivity::storeCoverBuffer, this));
 
-  // Build menu items dynamically
-  std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_FILE_TRANSFER),
-                                        tr(STR_SETTINGS_TITLE)};
-  std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings};
-
-  if (hasLibrarySlot()) {
-    menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
-    menuIcons.insert(menuIcons.begin() + 2, Plugins);
+#if defined(CROSSINK_ENABLE_POKEMON)
+  if (showPokemonAccessory) {
+    pokemon::drawPokemonHomeAccessory(
+        renderer, pokemonDashboard_,
+        Rect{content.x, metrics.homeTopPadding + coverTileHeight + 2, content.width,
+             pokemon::kPokemonHomeAccessoryHeight});
   }
-
-  if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
-    // Insert Continue Reading at the top if enabled in theme
-    menuItems.insert(menuItems.begin(), tr(STR_CONTINUE_READING));
-    menuIcons.insert(menuIcons.begin(), Book);
-  }
+#endif
 
   GUI.drawButtonMenu(
       renderer,
-      Rect{content.x, metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset, content.width,
+      Rect{content.x, metrics.homeTopPadding + coverTileHeight + metrics.homeMenuTopOffset + pokemonBandOffset,
+           content.width,
            pageHeight - (metrics.headerHeight + metrics.homeTopPadding + metrics.verticalSpacing +
                          metrics.homeMenuTopOffset + metrics.buttonHintsHeight)},
       static_cast<int>(menuItems.size()),
@@ -561,7 +631,12 @@ void HomeActivity::render(RenderLock&&) {
   } else if (!recentsLoaded && !recentsLoading) {
     recentsLoading = true;
     const int themeThumbHeight = GUI.homeCoverThumbHeight(renderer);
-    loadRecentCovers(themeThumbHeight > 0 ? themeThumbHeight : metrics.homeCoverHeight);
+    int thumbHeight = themeThumbHeight > 0 ? themeThumbHeight : metrics.homeCoverHeight;
+    // roundedraff scales its cover to a shortened tile, so make the thumb at that size
+    if (SETTINGS.uiTheme == CrossPointSettings::ROUNDEDRAFF) {
+      thumbHeight = std::min(thumbHeight, std::max(1, coverTileHeight - 40));
+    }
+    loadRecentCovers(thumbHeight);
   }
 }
 
@@ -578,3 +653,27 @@ void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
 
 void HomeActivity::onPluginsOpen() { activityManager.goToPlugins(hasOpdsServers); }
+
+#if defined(CROSSINK_ENABLE_POKEMON)
+void HomeActivity::loadPokemonDashboard() {
+  pokemonDashboard_ = {};
+  if (SETTINGS.pokemonHomeScreen != 0 && pokemon::pokemonHomeAccessorySupported(SETTINGS.uiTheme)) {
+    pokemon::devicePokemonService().loadDashboardSnapshot(pokemonDashboard_);
+  }
+}
+
+void HomeActivity::onPokemonOpen() {
+  auto pokemonActivity = makeUniqueNoThrow<PokemonActivity>(renderer, mappedInput);
+  if (!pokemonActivity) {
+    LOG_ERR("HOME", "Could not allocate Pokemon activity");
+    return;
+  }
+  startActivityForResult(std::move(pokemonActivity), [this](const ActivityResult&) {
+    loadPokemonDashboard();
+    // the accessory can change the cover tile height, so drop the cached cover
+    coverRendered = false;
+    freeCoverBuffer();
+    requestUpdate();
+  });
+}
+#endif

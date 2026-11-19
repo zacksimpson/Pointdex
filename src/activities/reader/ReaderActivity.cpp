@@ -20,6 +20,10 @@
 #include "XtcReaderActivity.h"
 #include "util/PluginEvents.h"
 
+#if defined(CROSSINK_ENABLE_POKEMON)
+#include "pokemon/PokemonService.h"
+#endif
+
 ReaderActivity::ReaderActivity(const char* name, GfxRenderer& renderer, MappedInputManager& mappedInput,
                                std::string bookPath, const bool allowFastInitialRefresh)
     : Activity(name, renderer, mappedInput), bookPath(std::move(bookPath)) {
@@ -49,10 +53,30 @@ void ReaderActivity::applyInitialOrientation() { ReaderUtils::applyOrientation(r
 
 void ReaderActivity::disableFastInitialRefresh() { pagesUntilFullRefresh = 0; }
 
-void ReaderActivity::notePageTurn(const bool forward, const bool succeeded) {
+void ReaderActivity::notePageTurn(const bool forward, const bool succeeded, const bool creditsReading) {
   RenderLock lock(*this);
   readerSession.noteTurn(forward, succeeded);
+#if defined(CROSSINK_ENABLE_POKEMON)
+  // The verifier waits for the render to finish, so a turn only counts once the page is really on screen.
+  if (succeeded && creditsReading) {
+    pokemonTurnVerifier.request(static_cast<uint8_t>(std::clamp(getProgressPercent(), 0, 100)));
+  }
+#else
+  (void)creditsReading;
+#endif
 }
+
+#if defined(CROSSINK_ENABLE_POKEMON)
+void ReaderActivity::pokemonPoll() {
+  pokemon::VerifiedTurn turn{};
+  if (pokemonTurnVerifier.consume(turn)) {
+    auto& service = pokemon::devicePokemonService();
+    service.setBookProgressPercent(turn.bookProgressPercent);
+    service.onSuccessfulPageTurn(turn.renderedAtMs);
+  }
+  pokemon::devicePokemonService().checkpointIfDue(static_cast<uint32_t>(millis()));
+}
+#endif
 
 void ReaderActivity::onEnter() {
   Activity::onEnter();
@@ -81,6 +105,10 @@ void ReaderActivity::onEnter() {
     return;
   }
 
+#if defined(CROSSINK_ENABLE_POKEMON)
+  pokemon::devicePokemonService().beginReadingSession();
+#endif
+
   requestUpdate();
 }
 
@@ -96,6 +124,10 @@ void ReaderActivity::rememberBookOnceRendered() {
 
 void ReaderActivity::onExit() {
   Activity::onExit();
+
+#if defined(CROSSINK_ENABLE_POKEMON)
+  pokemon::devicePokemonService().flushOnExit(static_cast<uint32_t>(millis()));
+#endif
 
   // Keep rebuildable font buffers from pinning the heap between reading sessions.
   if (auto* fontCache = renderer.getFontCacheManager()) {
@@ -220,6 +252,9 @@ bool ReaderActivity::handleEndOfBookPageTurn(const bool prevTriggered, const boo
 
 void ReaderActivity::loop() {
   rememberBookOnceRendered();
+#if defined(CROSSINK_ENABLE_POKEMON)
+  pokemonPoll();
+#endif
   clearEndOfBookOptionsIfNeeded();
   if (handleEndOfBookMenu()) return;
   if (handleFormatInput()) return;
@@ -238,7 +273,7 @@ void ReaderActivity::loop() {
 
   const bool changed = skip ? skipPages(prevTriggered ? -10 : 10) : pageTurn(!prevTriggered);
   // A skip is navigation, not reading: it never counts toward session dwell.
-  notePageTurn(!skip && !prevTriggered, changed);
+  notePageTurn(!skip && !prevTriggered, changed, !skip);
   if (changed && (touch.prev || touch.next)) haptic_feedback::touchAction(skip);
   requestUpdate();
 }
@@ -266,6 +301,9 @@ void ReaderActivity::render(RenderLock&&) {
 
   renderBook();
   readerSession.onRenderComplete(millis(), trustedtime::trustedNow(), getProgressBasisPoints());
+#if defined(CROSSINK_ENABLE_POKEMON)
+  pokemonTurnVerifier.renderSucceeded(static_cast<uint32_t>(millis()));
+#endif
 }
 
 bool ReaderActivity::handleForcedRefresh() {

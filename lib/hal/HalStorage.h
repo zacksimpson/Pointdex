@@ -99,6 +99,8 @@ class HalFile : public Print {
   HalFile& operator=(const HalFile&) = delete;
 
   void flush();
+  // Push buffered data to the card. Returns false if the write-back fails.
+  bool sync();
   size_t getName(char* name, size_t len);
   size_t size();
   size_t fileSize();

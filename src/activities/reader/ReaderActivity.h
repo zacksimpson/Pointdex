@@ -9,6 +9,10 @@
 #include "ReaderSession.h"
 #include "activities/Activity.h"
 
+#if defined(CROSSINK_ENABLE_POKEMON)
+#include <PokemonTracker.h>
+#endif
+
 class ReaderActivity : public Activity {
   friend class ActivityManager;  // turns pages for a Bluetooth remote (ActivityManager::remoteTurn)
 
@@ -20,6 +24,11 @@ class ReaderActivity : public Activity {
   std::unique_ptr<EndOfBookOptions> endOfBookOptions;
   std::atomic<bool> endOfBookOptionsReady{false};
   ReaderSession readerSession;
+#if defined(CROSSINK_ENABLE_POKEMON)
+  pokemon::PokemonTurnVerifier pokemonTurnVerifier;
+  // Credits verified manual turns and checkpoints saves. Call once per loop.
+  void pokemonPoll();
+#endif
   std::atomic<bool> pageRendered{false};
   bool bookRemembered = false;
   void markPageRendered() { pageRendered.store(true, std::memory_order_release); }
@@ -68,7 +77,8 @@ class ReaderActivity : public Activity {
   bool handleEndOfBookPageTurn(bool prevTriggered, bool nextTriggered);
   void clearEndOfBookOptionsIfNeeded();
   void disableFastInitialRefresh();
-  void notePageTurn(bool forward, bool succeeded);
+  // creditsReading is false for auto page turns and chapter skips, which never train a Pokemon.
+  void notePageTurn(bool forward, bool succeeded, bool creditsReading = true);
   void flushReaderSession();
 
  public:
