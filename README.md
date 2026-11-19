@@ -1,8 +1,13 @@
 # Pointdex
 
-A reading-powered Pokémon companion for the Xteink X3 e-reader, built on [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader) 2.0.0. Turn real pages in your books and your lead Pokémon trains, wild Pokémon turn up, trainers challenge you, and you can work toward the gyms and the Pokédex.
+A CrossPoint-based Pokémon reading companion game for the Xteink X3. Turn real pages in your books and your lead Pokémon trains, wild Pokémon turn up, trainers challenge you, and you can work toward the gyms and the Pokédex.
 
-This is an unofficial, noncommercial fan project. It is not affiliated with or endorsed by Nintendo, Creatures Inc., GAME FREAK Inc., The Pokémon Company, Xteink, or the CrossPoint Reader project. See [NOTICE.md](NOTICE.md) for credits and rights.
+## Credits
+Pointdex exists because I've just chosen to mash a few existing wonderful open-source projects together. Very little is original to this repo. 
+- [CrossPoint Reader 2.0.0](https://github.com/crosspoint-reader/crosspoint-reader/releases/tag/2.0.0) is the firmware and interface everything runs on.
+- [padge01’s xteink-pokemon-game](https://github.com/padge01/xteink-pokemon-game) is the original reading-powered Pokémon companion, and the idea behind this project.
+- [thebitsworld’s xteink-pokemon-game](https://github.com/thebitsworld/xteink-pokemon-game/tree/feat/reader-speed-1) iterated on that with the battles, trainers, gyms, items and moves.
+However, both existing Pokémon projects are based on CrossInk, a fork of CrossPoint. This is where Pointdex differs (because I just personally prefer the UI from CrossPoint). 
 
 ## Branches
 
@@ -11,11 +16,12 @@ This is an unofficial, noncommercial fan project. It is not affiliated with or e
 
 ## What is here
 
-The Pokémon game sits on top of stock CrossPoint 2.0.0 and keeps its interface and themes. Home shows a Pokémon strip with your lead Pokémon on the Classic, Lyra, Lyra three covers and RoundedRaff themes. If there is no room for the strip, the Pokémon row on Home gets a `!` when something is waiting.
+The Pokémon game sits on top of stock CrossPoint 2.0.0 and keeps its interface and themes. Home shows a Pokémon strip with your lead Pokémon on the Classic, Lyra, Lyra Extended and RoundedRaff themes. If there is no room for the strip, the Pokémon row on Home gets a `!` when something is waiting.
 
-Both branches also have a Time Left status bar item (chapter or book, Settings > Customise Status Bar) and Home layout fixes so the extra Pokémon row fits above the button hints.
+Both branches also have a Time Left status bar item (chapter or book, Settings > Customize Status Bar) and Home layout fixes so the extra Pokémon row fits above the button hints.
 
-Only the X3 is a target. It has not been tried on other devices, and the Nearby Sync, Applications, Game Boy and Bluetooth features of the projects this builds on are not included.
+> [!WARNING]
+> **Only the Xteink X3 is a target.** It has not been tried on other devices like the X4 Classic or other ESP32 based devices.
 
 ## Art
 
